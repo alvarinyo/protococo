@@ -479,8 +479,6 @@ def field_encode(field_rule, unencoded):
         additional_zeros = len(field_rule[0]) - len(short_hex_string)
         return ("0"*additional_zeros + short_hex_string).lower()
     
-    #to_hex_string = lambda x: (hex(x)[2:] if len(hex(x))%2 == 0 else "0" + hex(x)[2:]).lower()
-    
     for param in field_rule[1:]:
         param_tokens = param.split()
         if param_tokens[0] == "encodedas":
@@ -1091,7 +1089,7 @@ def create_message(message_name, all_messages_rules_tokenized, input_dict = None
                 
                 #get_length_hex_string = lambda x: (hex(x)[2:] if len(hex(x))%2 == 0 else "0" + hex(x)[2:]).lower()
                 #length_hex_string = get_length_hex_string(length) #BIGENDIAN
-                length_hex_string = field_encode(rule, length)
+                length_hex_string = field_encode(rule, str(length))
                 #print(f"HOLA : {length_hex_string=}")
                 
                 #raise RuntimeError("ASDFASDF")
