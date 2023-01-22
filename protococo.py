@@ -833,8 +833,9 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
 
 def split_multimessage_rules(multimessage_rules_string):
     multimessage_rules_string_without_empty_lines = os.linesep.join([s.strip() for s in multimessage_rules_string.splitlines() if s]) 
-    list_of_message_rules = re.split("(\[[^\[]*)", multimessage_rules_string_without_empty_lines, re.MULTILINE)
+    list_of_message_rules = re.split("(\[[^\[]*)", multimessage_rules_string_without_empty_lines)
     list_of_message_rules = list(filter(lambda x: x!= "", list_of_message_rules))
+    
     return list_of_message_rules
 
 class AnsiColors:
