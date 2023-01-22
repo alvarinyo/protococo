@@ -20,7 +20,7 @@ N           #BODY
 [foo_message]
 #subtypeof general_message
 #override MESSAGE TYPE
-01          #MESSAGE TYPE
+01          #FOO MESSAGE
 #override MESSAGE BODY
 XX          #FOO FIELD A
 XXXX        #FOO FIELD B
@@ -29,7 +29,7 @@ N           #FOO DATA
 [bar_message]
 #subtypeof general_message
 #override MESSAGE TYPE
-02          #MESSAGE TYPE
+02          #BAR MESSAGE
 #override MESSAGE BODY
 XX          #BAR FIELD A
 N           #BAR DATA
