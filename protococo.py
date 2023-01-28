@@ -475,6 +475,7 @@ def field_encode(field_rule, unencoded):
     result = unencoded
     
     def to_hex_string(x):
+        x = int(x)
         short_hex_string = hex(x)[2:]
         additional_zeros = len(field_rule[0]) - len(short_hex_string)
         return ("0"*additional_zeros + short_hex_string).lower()
@@ -1172,17 +1173,20 @@ def get_input_schema(message_name, all_messages_rules_tokenized):
 #TODO fix: falla cuando un lengthof cae dentro de una ellipsis o más allá del fin del mensaje en mensajes incompletos
 #TODO improvement: cambiar el --dissect-fields por un arg adicional opcional filter-fields que tb funcione con el check
 #TODO feature: #include message, #includepart message
+#TODO feature: variation of message (1byte,2 byte) -> double subtypeof?
 #TODO feature: X16
 #TODO improvement: N field of missing length could be OK sometimes
 #TODO feature: endswith instead of length
-#TODO feature: --input-format=bin
+#TODO feature: --input-format=bin, --input-format=hex-string
 #TODO feature: create message
 #TODO feature: regex matcher for ascii rule
 #TODO doc: Foo Protocol
 #TODO tests: Bash diff tests
 #TODO fix: Logger for --verbose fix
-#TODO fix: collision between parent and child names. Name mangling?
-#TODO endianness as a separate parameter (perhaps encodedas)
+#TODO fix: collision between parent and child names. store multifield stack in length_params
+#TODO feature: --input-format=json
+#TODO feature: output-format==ptable
+#TODO optimization: don't tokenize rules for each validation
             
 if __name__ == "__main__":
 
