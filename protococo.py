@@ -26,6 +26,7 @@ Options:
   
 """
 
+__version__ = "0.0.1"
 
 from pprint import *
 from collections import OrderedDict
@@ -1162,35 +1163,15 @@ def get_input_schema(message_name, all_messages_rules_tokenized):
     
     return schema
 
-    
 
 
-#TODO warnings: 2 equivalent messages in rules
-#TODO error: 2 fields with same name in rules
-#TODO refactor: organizar rules en clases
-#TODO feature: complete tree in multiline check/dissect
-#TODO ?: identificación certera del mensaje en función del message_type???
-#TODO fix: falla cuando un lengthof cae dentro de una ellipsis o más allá del fin del mensaje en mensajes incompletos
-#TODO improvement: cambiar el --dissect-fields por un arg adicional opcional filter-fields que tb funcione con el check
-#TODO feature: #include message, #includepart message
-#TODO feature: variation of message (1byte,2 byte) -> double subtypeof?
-#TODO feature: X16
-#TODO improvement: N field of missing length could be OK sometimes
-#TODO feature: endswith instead of length
-#TODO feature: --input-format=bin, --input-format=hex-string
-#TODO feature: create message
-#TODO feature: regex matcher for ascii rule
-#TODO doc: Foo Protocol
-#TODO tests: Bash diff tests
-#TODO fix: Logger for --verbose fix
-#TODO fix: collision between parent and child names. store multifield stack in length_params
-#TODO feature: --input-format=json
-#TODO feature: output-format==ptable
-#TODO optimization: don't tokenize rules for each validation
-            
-if __name__ == "__main__":
+"""
 
-    args = docopt(__doc__, version="Protococo 0.0.1")
+        DEFAULT ENTRYPOINT
+
+"""
+def cli_main():
+    args = docopt(__doc__, version=f"protococo {__version__}")
     #print(args)
 
     #with open("default.coco") as f:
@@ -1304,3 +1285,32 @@ if __name__ == "__main__":
     
     
     
+
+
+
+#TODO warnings: 2 equivalent messages in rules
+#TODO error: 2 fields with same name in rules
+#TODO refactor: organizar rules en clases
+#TODO feature: complete tree in multiline check/dissect
+#TODO ?: identificación certera del mensaje en función del message_type???
+#TODO fix: falla cuando un lengthof cae dentro de una ellipsis o más allá del fin del mensaje en mensajes incompletos
+#TODO improvement: cambiar el --dissect-fields por un arg adicional opcional filter-fields que tb funcione con el check
+#TODO feature: #include message, #includepart message
+#TODO feature: variation of message (1byte,2 byte) -> double subtypeof?
+#TODO feature: X16
+#TODO improvement: N field of missing length could be OK sometimes
+#TODO feature: endswith instead of length
+#TODO feature: --input-format=bin, --input-format=hex-string
+#TODO feature: create message
+#TODO feature: regex matcher for ascii rule
+#TODO doc: Foo Protocol
+#TODO tests: Bash diff tests
+#TODO fix: Logger for --verbose fix
+#TODO fix: collision between parent and child names. store multifield stack in length_params
+#TODO feature: --input-format=json
+#TODO feature: output-format==ptable
+#TODO optimization: don't tokenize rules for each validation
+
+            
+if __name__ == "__main__":
+    cli_main()
