@@ -8,7 +8,7 @@ Usage:
   protococo.py find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
-                      [--list --verbose --decode]
+                      [--list --verbose --decode --long-name]
   protococo.py create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
   protococo.py json-recipe <message_names> ...
@@ -1327,19 +1327,23 @@ def cli_main():
                     if validate_result[0] == False:
                         ret = 1
                 
+                name_string = match
+                if args["--long-name"] == False:
+                    name_string = re.sub(r'.*?([^\.]*)$', r'\1', match)
+                    
                 if args["--list"] == False:
                     if oneline_enabled:
-                        print(color  + f"[{match}]" + AnsiColors.ENDC + "\t" + explanation)
+                        print(color  + f"[{name_string}]" + AnsiColors.ENDC + "\t" + explanation)
                     else:
-                        print(color  + f"[{match}]" + AnsiColors.ENDC)
+                        print(color  + f"[{name_string}]" + AnsiColors.ENDC)
                         print(explanation)
                         print()
                     break
                 else:
                     if oneline_enabled:
-                        print(color  + f"- {i}: [{match}]" + AnsiColors.ENDC + "\t" + explanation)
+                        print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC + "\t" + explanation)
                     else:
-                        print(color  + f"- {i}: [{match}]" + AnsiColors.ENDC)
+                        print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
                         print(explanation)
                         print()
     elif args["create"] == True:
