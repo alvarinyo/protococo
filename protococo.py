@@ -34,6 +34,7 @@ import re
 import os
 import sys
 import json
+import copy
 from docopt import docopt
 
 # TODO: Esto pide a gritos como mínimo 3 clases: FieldRule (con byte_symbol, field_name y params), SpecialRule (con params), TitleRule (con message_name)
@@ -214,11 +215,15 @@ def override_rules(parent_rules, child_rules):
     #pprint(override_dict)
     
     for overriden_field_name, subfields in override_dict.items():
+        found_override = False
         for i, parent_rule in enumerate(tokenized_overriden_rules):
             #print(f"{parent_rule=}")
             if rule_is_field(parent_rule) and overriden_field_name == field_rule_get_field_name(parent_rule):
                 tokenized_overriden_rules = tokenized_overriden_rules[:i] + subfields + tokenized_overriden_rules[i+1:]
+                found_override = True
                 break
+        if not found_override:
+            raise RuntimeError(f"Overriding spec '{title_rule_get_name(child_rules[0])}', couldn't find overriden field '{overriden_field_name}' in parent spec '{parent_name}'")
     
     #pprint(tokenized_overriden_rules)
     
@@ -241,20 +246,66 @@ def perform_subtypeof_overrides(child_tokenized_rules, all_messages_rules_tokeni
             else:
                 #pprint(f"found parent {parent_rules[0]=} of subtype for {rule=}")
                 
-                #pprint(f"before overide: {expanded_child_rules=}")
-                #print(f"{expanded_child_rules[i]=}")
+                #pprint(f"before override:")
+                #pprint(expanded_child_rules)
+                # pprint(f"{expanded_child_rules[i]=}")
                 expanded_child_rules = override_rules(parent_rules, expanded_child_rules)
-                #pprint(f"after override: {expanded_child_rules=}")
-                #print(f"{expanded_child_rules[i]=}")
+                #pprint(f"after override")
+                #pprint(expanded_child_rules)
+                #pprint(f"{expanded_child_rules[i]=}")
 
             i = 0
         i = i+1
     return expanded_child_rules
 
+def preprocess_encode_fields(all_messages_rules_tokenized):
+    for message_rules in all_messages_rules_tokenized:
+        for rule in message_rules:
+            if rule_is_field(rule):
+                byte_symbol = rule[0].strip()
+                if byte_symbol[0] == "(" and byte_symbol[-1] == ")":
+                    #Override field rule byte symbol with the encoded value (hex string)
+                    rule[0] = field_encode(rule, byte_symbol[1:-1])
+
+def preprocess_multiple_subtypeof(all_messages_rules_tokenized):
+    j = 0
+    while j < len(all_messages_rules_tokenized):
+        message_rules = all_messages_rules_tokenized[j]
+        for i, rule in enumerate(message_rules):
+            if rule_is_subtypeof(rule):
+                subtypeof_rule_args_string = subtypeof_rule_get_parent(rule)
+                parents = subtypeof_rule_args_string.split()
+                if len(parents) > 1:
+                    assert rule_is_title(message_rules[0])
+
+                    new_message_mangled_names = []
+                    #then calculate rest of variations (for rest of parents) and append to the cocodocument:
+                    for parent in parents:
+                        new_message_spec = copy.deepcopy(message_rules)
+                        new_message_spec[i] = ["", f"subtypeof {parent}"] #replace subtypeof rule with a subtypeof rule - with each parent
+                        assert rule_is_title(new_message_spec[0])
+                        new_message_spec[0][0] = f"[{parent}.{new_message_spec[0][0][1:]}" #replace title of spec with mangled name #TODO can I delete this line?
+                        new_message_mangled_names.append(title_rule_get_name(new_message_spec[0]))
+
+                        all_messages_rules_tokenized = all_messages_rules_tokenized[:j] + [new_message_spec] + all_messages_rules_tokenized[j:]
+                        j+=1
+                    
+                    del all_messages_rules_tokenized[j]
+                    j-=1
+                        
+                    #now, make variations for all children
+                    for k, mr in enumerate(all_messages_rules_tokenized):
+                        for m, r in enumerate(mr):
+                            if rule_is_subtypeof(r):
+                                if title_rule_get_name(message_rules[0]) in subtypeof_rule_get_parent(r).split():
+                                    r = ["", f"subtypeof {' '.join(new_message_mangled_names)}"]
+                                    all_messages_rules_tokenized[k][m] = r
+        j+=1
+    
+    return all_messages_rules_tokenized
+
 def full_field_names_refer_to_same(a, b):
     return re.sub(":[^\.]*", "", a) == re.sub(":[^\.]*", "", b)
-
-#print(full_field_names_refer_to_same("general_message_format:data_to_component.MESSAGE BODY", "general_message_format.MESSAGE BODY"))
 
 def rule_is_multifieldstart(rule):
     return len(rule) == 2 and rule[1][:15] == "startmultifield"
@@ -604,10 +655,12 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
     assert is_valid_message_input(message), "Malformed message, invalid hex string"
     
     tokenized_rules = tokenize_rules(message_rules) if isinstance(message_rules, str) else message_rules
-    #pprint(f"before overriding: {tokenized_rules=}")
+    #print("before overriding:")
+    #pprint(tokenized_rules)
 
     tokenized_rules = perform_subtypeof_overrides(tokenized_rules, all_messages_rules_tokenized)
     ## FROM THIS POINT ON WE HAVE OUR TOKENIZED RULES FULLY EXPANDED
+    #print("after overriding:")
     #pprint(tokenized_rules)
 
     conflicting_field_names = get_conflicting_field_names(tokenized_rules)
@@ -1232,7 +1285,8 @@ def cli_main():
     ret = 0
         
     all_messages_rules_tokenized = [tokenize_rules(r) for r in split_multimessage_rules(all_messages_string)]
-    
+    preprocess_encode_fields(all_messages_rules_tokenized)
+    all_messages_rules_tokenized = preprocess_multiple_subtypeof(all_messages_rules_tokenized)
     
     if args["check"] == True:
         messages_input = [sys.stdin.read()] if not args["<message_hex_string>"] else args["<message_hex_string>"]
@@ -1339,26 +1393,26 @@ def cli_main():
 
 #TODO warnings: 2 equivalent messages in rules
 #TODO error: 2 fields with same name in rules
-#TODO refactor: organizar rules en clases
 #TODO feature: complete tree in multiline check/dissect
 #TODO ?: identificación certera del mensaje en función del message_type???
 #TODO fix: falla cuando un lengthof cae dentro de una ellipsis o más allá del fin del mensaje en mensajes incompletos
 #TODO improvement: cambiar el --dissect-fields por un arg adicional opcional filter-fields que tb funcione con el check
 #TODO feature: #include message, #includepart message
-#TODO feature: variation of message (1byte,2 byte) -> double subtypeof?
 #TODO feature: X16
 #TODO improvement: N field of missing length could be OK sometimes
 #TODO feature: endswith instead of length
 #TODO feature: --input-format=bin, --input-format=hex-string
 #TODO feature: create message
 #TODO feature: regex matcher for ascii rule
-#TODO doc: Foo Protocol
 #TODO tests: Bash diff tests
 #TODO fix: Logger for --verbose fix
 #TODO feature: --input-format=json
 #TODO feature: output-format==ptable
 #TODO optimization: don't tokenize rules for each validation
 #TODO fix: overriden fields with different params, like encodedas
+#TODO optimization: if a parent rule fails, don't check subtypes. --list'd not be possible
+#TODO refactor: CocoDocument, CocoMessageSpec, CocoRule, CocoParser, CocoAnalyzer, CocoCLI
+#TODO improvement: cocofile checks: no "." in any rule
 
             
 if __name__ == "__main__":
