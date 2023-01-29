@@ -533,7 +533,7 @@ def field_get_expected_bytes_length(field_rule, previous_length_params_list, act
             
             #print(f"Checking in not-multifields, {field_name=}, {get_field_name_from_length_param(param)=}")
             
-            if field_name == get_field_name_from_length_param(param):
+            if field_name == get_field_name_from_length_param(param) and unmatched_multifieldstart_params_to_stack(active_multifields) == param["multifields_stack"]:
                 foundLength = True
                 return get_length_from_length_param(param, message)
         
@@ -580,6 +580,22 @@ def field_get_expected_bytes_length(field_rule, previous_length_params_list, act
     if not foundLength:
         raise RuntimeError(f"Length of N field not found in previous fields for rule: {field_rule}")
 
+def unmatched_multifieldstart_params_to_stack(unmatched_multifieldstart_params):
+    return [get_multifieldstart_full_name(i["param"]) for i in unmatched_multifieldstart_params]
+
+def get_conflicting_field_names(tokenized_message_rules):
+    conflicting_names = []
+    names = []
+    for rule in tokenized_message_rules:
+        if rule_is_field(rule):
+            field_name = rule[1]
+            if field_name in names:
+                if not field_name in conflicting_names:
+                    conflicting_names.append(field_name)
+            else:
+                names.append(field_name)
+
+    return conflicting_names
 
 def validate_message(message_rules, message, all_messages_rules_tokenized):
     assert is_valid_message_input(message), "Malformed message, invalid hex string"
@@ -590,6 +606,8 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
     tokenized_rules = perform_subtypeof_overrides(tokenized_rules, all_messages_rules_tokenized)
     ## FROM THIS POINT ON WE HAVE OUR TOKENIZED RULES FULLY EXPANDED
     #pprint(tokenized_rules)
+
+    conflicting_field_names = get_conflicting_field_names(tokenized_rules)
     
     title_rule = None
     title = None
@@ -640,8 +658,9 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                 pprint(e)
             
             
-            expected_lengths_dict[field_name] = current_length
+            expected_lengths_dict[(tuple(unmatched_multifieldstart_params_to_stack(unmatched_multifieldstart_params)), field_name)] = current_length
             
+
             if byte_symbol_is_valid_hex(byte_symbol):
                 pass
             elif byte_symbol_is_XX_rule_type(byte_symbol):
@@ -653,7 +672,8 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                             "param" : param, 
                             "value_offset" : current_offset, 
                             "value_length" : current_length,
-                            "parent_message_name" : title
+                            "parent_message_name" : title,
+                            "multifields_stack" : unmatched_multifieldstart_params_to_stack(unmatched_multifieldstart_params),
                         })
                         #print(length_params)
             elif byte_symbol == "N":
@@ -668,41 +688,48 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
     i = 0
     current_offset = 0
     current_length = 0
+
+    multifield_names_stack = []
     while i < len(tokenized_rules):
             
         rule = tokenized_rules[i]
-        
+
         if rule_is_field(rule):
             
             byte_symbol = rule[0]
             field_name = rule[1]
             params = rule[2:]
-            
+
+            field_name_mangled = field_name if not field_name in conflicting_field_names else ".".join([i.split(".", 1)[1] for i in multifield_names_stack] + [field_name])
+
+            if field_name_mangled in result_dict.keys():
+                raise RuntimeError(f"Duplicated field {field_name} in {rule=} of {title_rule_get_name(title_rule)}")
+
             if field_name in unknown_length_fields:
-                result_dict[field_name] = "(?)"
-                diff_dict[field_name]  = False
+                result_dict[field_name_mangled] = "(?)"
+                diff_dict[field_name_mangled]  = False
                 log_message = "Can't deduce this field length"
                 try:
-                    log_dict[field_name].append(log_message)
+                    log_dict[field_name_mangled].append(log_message)
                 except KeyError:
-                    log_dict[field_name] = [log_message]
+                    log_dict[field_name_mangled] = [log_message]
                 i+=1
                 continue
             
-            current_length = expected_lengths_dict[field_name]
+            current_length = expected_lengths_dict[(tuple(multifield_names_stack), field_name)]
             
             #print(f"{current_offset=},{current_length=}, '{message[current_offset:current_offset + current_length * 2]}'")
             
             if not "." in message[current_offset:current_offset + current_length * 2] and current_offset + current_length * 2 > len(message):
-                result_dict[field_name] = message[current_offset:]
+                result_dict[field_name_mangled] = message[current_offset:]
                 
-                number_of_missing_bytes = current_length - len(result_dict[field_name])//2
+                number_of_missing_bytes = current_length - len(result_dict[field_name_mangled])//2
                 if number_of_missing_bytes <= 16:
-                    result_dict[field_name] += "--" * number_of_missing_bytes
+                    result_dict[field_name_mangled] += "--" * number_of_missing_bytes
                 else:
-                    result_dict[field_name] += f"---({number_of_missing_bytes} bytes missing)---"
+                    result_dict[field_name_mangled] += f"---({number_of_missing_bytes} bytes missing)---"
                 
-                diff_dict[field_name] = False
+                diff_dict[field_name_mangled] = False
                 current_offset = len(message)
             
             elif "." in message[current_offset:current_offset + current_length * 2]: # and not message[current_offset:current_offset+3] == "...":
@@ -714,19 +741,29 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                 this_field_expected_length = 0
                 total_expected_length = 0
                 expected_length_after_this_field = 0
+                
+                mfns_stack = []
                 for j, r in enumerate(tokenized_rules):
                     if (rule_is_field(r)):
-                        r_length = expected_lengths_dict[field_rule_get_field_name(r)]
+                        r_length = expected_lengths_dict[(tuple(mfns_stack),field_rule_get_field_name(r))]
                         total_expected_length += r_length
                         if j==i:
                             this_field_expected_length = r_length
                         elif j>i:
                             expected_length_after_this_field += r_length
+                    elif rule_is_multifieldstart(r):
+                        multifield_name = get_multifieldstart_full_name(r[1])
+                        mfns_stack.append(multifield_name)
+                    elif rule_is_multifieldend(r):
+                        mfs_name = mfns_stack[-1]
+                        mfe_name = get_multifieldend_full_name(r[1])
+                        assert mfs_name == mfe_name, f"Unexpected multifield end, {r=}, {mfns_stack[-1]=}"
+                        mfns_stack.pop()
                 #print(f"{total_expected_length=}")
                 #print(f"{expected_length_after_this_field=}")
 
-                result_dict[field_name] = message[current_offset:ellipsis_offset]
-                diff_dict[field_name] = True
+                result_dict[field_name_mangled] = message[current_offset:ellipsis_offset]
+                diff_dict[field_name_mangled] = True
                 
                 inserted_length = len(message[current_offset:ellipsis_offset])//2
                                 
@@ -739,10 +776,10 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                 if length_to_insert < 0:
                     number_of_missing_bytes = this_field_expected_length - inserted_length
                     if number_of_missing_bytes > 0:
-                        result_dict[field_name] += f"...({number_of_missing_bytes} bytes)..."
+                        result_dict[field_name_mangled] += f"...({number_of_missing_bytes} bytes)..."
                     
-                    result_without_missing_bytes_info = re.sub("...\(.*\)...", "...", result_dict[field_name])
-                    diff_dict.update({field_name: field_rule_complies_parent([result_without_missing_bytes_info, field_name], rule)})
+                    result_without_missing_bytes_info = re.sub("...\(.*\)...", "...", result_dict[field_name_mangled])
+                    diff_dict.update({field_name_mangled: field_rule_complies_parent([result_without_missing_bytes_info, field_name], rule)})
                     
                     current_offset = ellipsis_offset
                     
@@ -750,27 +787,27 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                     number_of_missing_bytes = this_field_expected_length - (inserted_length + length_to_insert)
                     if number_of_missing_bytes >= 0:
                         if number_of_missing_bytes > 0:
-                            result_dict[field_name] += f"...({number_of_missing_bytes} bytes)..."
-                        result_dict[field_name] += message[after_ellipsis_offset:after_ellipsis_offset+length_to_insert*2]
+                            result_dict[field_name_mangled] += f"...({number_of_missing_bytes} bytes)..."
+                        result_dict[field_name_mangled] += message[after_ellipsis_offset:after_ellipsis_offset+length_to_insert*2]
                         
-                        result_without_missing_bytes_info = re.sub("...\(.*\)...", "...", result_dict[field_name])
-                        diff_dict.update({field_name: field_rule_complies_parent([result_without_missing_bytes_info, field_name], rule)})
+                        result_without_missing_bytes_info = re.sub("...\(.*\)...", "...", result_dict[field_name_mangled])
+                        diff_dict.update({field_name_mangled: field_rule_complies_parent([result_without_missing_bytes_info, field_name_mangled], rule)})
                         
                     else:
                         is_valid = False
-                        diff_dict[field_name] = False
+                        diff_dict[field_name_mangled] = False
                         
                         after_overflow_offset = after_ellipsis_offset+length_to_insert*2 - (-number_of_missing_bytes*2)
                         middle_overflowing_msg = message[after_ellipsis_offset:after_ellipsis_offset+(-number_of_missing_bytes*2)]
                         correct_msg_part = message[after_ellipsis_offset+(-number_of_missing_bytes*2):]
                         
-                        result_dict[field_name] += f"(+{middle_overflowing_msg}) {correct_msg_part}"
-                        log_message = f"Message with ellipsis too long while checking field '{field_name}', overflowing {-number_of_missing_bytes} bytes: '{message[after_ellipsis_offset:after_ellipsis_offset+(-number_of_missing_bytes*2)]}'  after the ellipsis"
+                        result_dict[field_name_mangled] += f"(+{middle_overflowing_msg}) {correct_msg_part}"
+                        log_message = f"Message with ellipsis too long while checking field '{field_name_mangled}', overflowing {-number_of_missing_bytes} bytes: '{message[after_ellipsis_offset:after_ellipsis_offset+(-number_of_missing_bytes*2)]}'  after the ellipsis"
                                                                                                                                                                             
                         try:
-                            log_dict[field_name].append(log_message)
+                            log_dict[field_name_mangled].append(log_message)
                         except KeyError:
-                            log_dict[field_name] = [log_message]
+                            log_dict[field_name_mangled] = [log_message]
                 
             
                     # We should now have sth like this in the result_dict[field_name]:
@@ -784,29 +821,38 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                 
                 if current_length > 0:
                     aux_rule = [message[current_offset:current_offset+current_length * 2], field_name]
-                    diff_dict.update({field_name: field_rule_complies_parent(aux_rule, rule)})
+                    diff_dict.update({field_name_mangled: field_rule_complies_parent(aux_rule, rule)})
                     
-                    result_dict.update({field_name: message[current_offset:current_offset+current_length * 2]})
+                    result_dict.update({field_name_mangled: message[current_offset:current_offset+current_length * 2]})
                     
                     if field_rule_is_encoded(rule):
-                        decoded_result_dict[field_name] = f"{field_decode(rule, message_field_subtring)}"
+                        decoded_result_dict[field_name_mangled] = f"{field_decode(rule, message_field_subtring)}"
                 else:
                     current_length = 0
                     
-                    diff_dict.update({field_name: False})
-                    result_dict.update({field_name: "--"})
+                    diff_dict.update({field_name_mangled: False})
+                    result_dict.update({field_name_mangled: "--"})
                     
                     log_message = f"expected invalid length of {current_length} for field in rule {rule}"
                     #print(log_message)
                                                                                                                                                                             
                     try:
-                        log_dict[field_name].append(log_message)
+                        log_dict[field_name_mangled].append(log_message)
                     except KeyError:
-                        log_dict[field_name] = [log_message]
+                        log_dict[field_name_mangled] = [log_message]
             
             
                 current_offset += current_length * 2
-        
+            
+        elif rule_is_multifieldstart(rule):
+            multifield_name = get_multifieldstart_full_name(rule[1])
+            multifield_names_stack.append(multifield_name)
+        elif rule_is_multifieldend(rule):
+            mfs_name = multifield_names_stack[-1]
+            mfe_name = get_multifieldend_full_name(rule[1])
+            assert mfs_name == mfe_name, f"Unexpected multifield end, {rule=}, {multifield_names_stack[-1]=}"
+            multifield_names_stack.pop()
+            
         i=i+1
     
     if current_offset < len(message):
@@ -821,7 +867,7 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
         result_dict.update({None: message[current_offset:]})
         
     #pprint(diff_dict)
-    #pprint(result_dict)
+    # pprint(result_dict)
     #print(is_valid)
     
     if is_valid == True:
