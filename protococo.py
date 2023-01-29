@@ -336,8 +336,11 @@ def identify_message(message, all_messages_rules_tokenized):
                 result += 1
         
         return result
+    
+    def number_of_parents(message_name):
+        return len(get_subtype_parents(message_name, all_messages_rules_tokenized, False))
 
-    ordered_message_names = sorted(message_names, key=lambda x: (total_bytes_matching(validate_results[x]), total_fields_matching(validate_results[x])), reverse=True)
+    ordered_message_names = sorted(message_names, key=lambda x: (total_bytes_matching(validate_results[x]), total_fields_matching(validate_results[x]), number_of_parents(x)), reverse=True)
 
     #return True, ordered_message_names
     return ordered_message_names, validate_results
@@ -1352,10 +1355,10 @@ def cli_main():
 #TODO doc: Foo Protocol
 #TODO tests: Bash diff tests
 #TODO fix: Logger for --verbose fix
-#TODO fix: collision between parent and child names. store multifield stack in length_params
 #TODO feature: --input-format=json
 #TODO feature: output-format==ptable
 #TODO optimization: don't tokenize rules for each validation
+#TODO fix: overriden fields with different params, like encodedas
 
             
 if __name__ == "__main__":
