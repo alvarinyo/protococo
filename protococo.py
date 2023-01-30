@@ -297,8 +297,11 @@ def preprocess_multiple_subtypeof(all_messages_rules_tokenized):
                     for k, mr in enumerate(all_messages_rules_tokenized):
                         for m, r in enumerate(mr):
                             if rule_is_subtypeof(r):
-                                if title_rule_get_name(message_rules[0]) in subtypeof_rule_get_parent(r).split():
-                                    r = ["", f"subtypeof {' '.join(new_message_mangled_names)}"]
+                                r_parents = subtypeof_rule_get_parent(r).split()
+                                common_parent = title_rule_get_name(message_rules[0])
+                                if common_parent in r_parents:
+                                    r_parents.remove(common_parent)
+                                    r = ["", f"subtypeof {' '.join(r_parents + new_message_mangled_names)}"]
                                     all_messages_rules_tokenized[k][m] = r
         j+=1
     
