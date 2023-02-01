@@ -1,17 +1,17 @@
-#!/usr/bin/python3
-"""Protococo.
+#!/usr/bin/env python3
+"""protococo.
 
 Usage:
-  protococo.py check  <message_name> [<message_hex_string> ...]
+  protococo check  <message_name> [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>] 
                       [--verbose --decode]
-  protococo.py find   [<message_hex_string> ...]
+  protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
-                      [--list --verbose --decode --long-name]
-  protococo.py create (<message_name> | --from-json=<json_file>)
+                      [--list --verbose --decode --long-names]
+  protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
-  protococo.py json-recipe <message_names> ...
+  protococo json-recipe <message_names> ...
                       [--cocofile=<file>]
 
 Options:
@@ -1420,6 +1420,10 @@ def cli_main():
 #TODO optimization: if a parent rule fails, don't check subtypes. --list'd not be possible
 #TODO refactor: CocoDocument, CocoMessageSpec, CocoRule, CocoParser, CocoAnalyzer, CocoCLI
 #TODO improvement: cocofile checks: no "." in any rule
+#TODO fix: problem decoding littleendian from rule between parenthesis, example: (0)   #encodedas littlendian
+#TODO fix: override a 4 byte field with a 1 byte field. example: (0)   #encodedas littlendian with parent like XXXXXXXX
+#TODO feature: add encodedas json
+#TODO fix?: override field from different parent levels
 
             
 if __name__ == "__main__":
