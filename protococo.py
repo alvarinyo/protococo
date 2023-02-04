@@ -4,25 +4,28 @@
 Usage:
   protococo check  <message_name> [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>] 
-                      [--verbose --decode]
+                      [--verbose --decode --decode-no-newlines]
   protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
-                      [--list --verbose --decode --long-names]
+                      [--list --verbose --decode --decode-no-newlines --long-names]
   protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
   protococo json-recipe <message_names> ...
                       [--cocofile=<file>]
 
 Options:
-  -h --help             Show this screen.
-  --version             Show version.
-  --cocofile=<file>     Specify the protococo rules file [default: default.coco].
-  --verbose             Enable verbose output.
-  --format=<option>     Print message disection in different formats [default: oneline].
-                            Options: oneline, multiline.
-  --dissect             Include message field dissection in find results.
-  --list                Include a list of the most fitting messages in find results.
+  -h --help                 Show this screen.
+  --version                 Show version.
+  --cocofile=<file>         Specify the protococo rules file [default: default.coco].
+  --verbose                 Enable verbose output.
+  --format=<option>         Print message disection in different formats [default: compact].
+                                Options: oneline, multiline, compact.
+  --dissect                 Include message field dissection in find results.
+  --decode                  Decodes fields with encodedas parameters in message dissection
+  --decode-no-newlines      Replaces new lines in decoded fields of message dissections with \'\\n\' for a more compact output
+  --long-names              Prints the full mangled message names if a name mangling preprocess has been made during cocofile parsing
+  --list                    Include a list of the most fitting messages in find results.
   
 """
 
@@ -886,6 +889,10 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
                     
                     if field_rule_is_encoded(rule):
                         decoded_result_dict[field_name_mangled] = f"{field_decode(rule, message_field_subtring)}"
+                elif current_length == 0:
+                    diff_dict.update({field_name_mangled: True})
+                    result_dict.update({field_name_mangled: ""})
+
                 else:
                     current_length = 0
                     
@@ -945,21 +952,81 @@ def split_multimessage_rules(multimessage_rules_string):
     
     return list_of_message_rules
 
+def get_short_message_name(long_message_name):
+    return re.sub(r'.*?([^\.]*)$', r'\1', long_message_name)
+
+def get_max_message_name_length(all_messages_rules_tokenized, long_names = False):
+    max_length = 0
+    if long_names:
+        for message_rules in all_messages_rules_tokenized:
+            max_length = max(max_length, len(title_rule_get_name(message_rules[0])))
+    else:
+        for message_rules in all_messages_rules_tokenized:
+            max_length = max(max_length, len(get_short_message_name(title_rule_get_name(message_rules[0]))))
+    return max_length
+
 class AnsiColors:
-    HEADER = '\033[95m'
+    PURPLE = '\033[95m'
     OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
     OKGREEN = '\033[92m'
+    OKCYAN = '\033[96m'
     WARNING = '\033[93m'
     FAIL = '\033[91m'
+    FAIL2 = '\033[38;5;196m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+    UNDERLINE_OFF = '\033[24m'
+    
+def get_message_explanation_string_compact(validation_result, filter_fields = None, decode=False, no_newlines=False):
+    _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
+    
+    result_string = ""
+    odd = 0
+    for k, v in validation_result_dict.items():
+        if filter_fields is not None and k not in filter_fields:
+            continue
+        
+        odd ^= 1
+        
+        field_complies = validation_diff_dict[k]
+        
+        k_adj, v_adj = k, v
+        
+        if decode == True and k in validation_decoded_dict.keys():
+            v_adj = validation_decoded_dict[k]
+        
+        fail_color = AnsiColors.FAIL if odd == 1 else AnsiColors.FAIL2
+        ok_color = AnsiColors.OKGREEN if odd == 1 else AnsiColors.OKCYAN
+        if not field_complies:
+            color = fail_color
+        else:
+            color = ok_color
+        
+        v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
+            
+        if decode == True and k in validation_decoded_dict.keys():
+            if no_newlines:
+                v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
+            else:
+                v_adj = f"({v_adj})"
+            
+        if k_adj is not None:
+            result_string += f"{v_adj}"
+        else:   # Overflowing bytes field
+            result_string += f"|+{v_adj}"
+    
 
-def get_message_explanation_string_oneline(validation_result, filter_fields = None, decode=False):
+    
+    return result_string
+
+def get_message_explanation_string_oneline(validation_result, filter_fields = None, decode=False, no_newlines=False):
     
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
     
+    fail_color = AnsiColors.FAIL
+    ok_color = AnsiColors.OKGREEN
+
     result_string = ""
     for k, v in validation_result_dict.items():
         if filter_fields is not None and k not in filter_fields:
@@ -973,12 +1040,17 @@ def get_message_explanation_string_oneline(validation_result, filter_fields = No
             v_adj = validation_decoded_dict[k]
         
         if not field_complies:
-            v_adj = AnsiColors.BOLD + AnsiColors.FAIL + v_adj + AnsiColors.ENDC
+            color = fail_color
         else:
-            v_adj = AnsiColors.BOLD + AnsiColors.OKGREEN + v_adj + AnsiColors.ENDC
+            color = ok_color
+        
+        v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
             
         if decode == True and k in validation_decoded_dict.keys():
-            v_adj = f"({v_adj})"
+            if no_newlines:
+                v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
+            else:
+                v_adj = f"({v_adj})"
             
         if k_adj is not None:
             k_adj = AnsiColors.BOLD + k_adj + AnsiColors.ENDC
@@ -992,10 +1064,13 @@ def get_message_explanation_string_oneline(validation_result, filter_fields = No
     return result_string
 
 
-def get_message_explanation_string_multiline(validation_result, filter_fields = None, decode=False):
+def get_message_explanation_string_multiline(validation_result, filter_fields = None, decode=False, no_newlines=False):
     
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
     
+    fail_color = AnsiColors.FAIL
+    ok_color = AnsiColors.OKGREEN
+
     result_string_field_names = ""
     result_string_field_values = ""
     for k, v in validation_result_dict.items():
@@ -1014,12 +1089,20 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
             v_adj = "+" + v
         
         lendiff = len(k_adj) - len(v_adj)
+
+        if decode == True and k in validation_decoded_dict.keys():
+            lendiff-=2  #To compensate the fact that we are adding 2 parenthesis
+            if no_newlines:
+                v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
+            else:
+                v_adj = f"({v_adj})"
         
         if not field_complies:
-            v_adj = AnsiColors.BOLD + AnsiColors.FAIL + v_adj + AnsiColors.ENDC
+            color = fail_color
         else:
-            v_adj = AnsiColors.BOLD + AnsiColors.OKGREEN + v_adj + AnsiColors.ENDC
-        k_adj = AnsiColors.BOLD + k_adj + AnsiColors.ENDC
+            color = ok_color
+        
+        v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
             
         if lendiff < 0:
             prefix = " " * ((-lendiff)//2)
@@ -1044,14 +1127,16 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
     return result_string_field_names + "\n" + result_string_field_values
 
 
-def get_message_explanation_string(validation_result, validation_log_dict = None, oneline = False, filter_fields = None, decode = False):
+def get_message_explanation_string(validation_result, validation_log_dict = None, fmt="oneline", filter_fields = None, decode = False, no_newlines=False):
     
     _, validation_result_dict, validation_diff_dict, __, ___ = validation_result
     
-    if oneline == True:
-        result_string = get_message_explanation_string_oneline(validation_result, filter_fields, decode=decode)
+    if fmt == "oneline":
+        result_string = get_message_explanation_string_oneline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
+    elif fmt == "compact":
+        result_string = get_message_explanation_string_compact(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
     else:
-        result_string = get_message_explanation_string_multiline(validation_result, filter_fields, decode=decode)
+        result_string = get_message_explanation_string_multiline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
 
     logs_string = ""
     if validation_log_dict is not None and len(validation_log_dict) > 0:
@@ -1301,16 +1386,13 @@ def cli_main():
             if args["--verbose"] == True:
                 explanation_logs = validate_result[3]
                 
-            print(get_message_explanation_string(validate_result, explanation_logs, args["--format"] == "oneline", decode=args["--decode"]))
+            print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
             
             if validate_result[0] == False:
                 ret = 1
         
     elif args["find"] == True:
         messages_input = sys.stdin.read().split() if not args["<message_hex_string>"] else args["<message_hex_string>"]
-        
-        oneline_enabled = args["--format"] == "oneline"
-        
         for message_hex_string in messages_input:
             ordered_message_names, validate_results_by_message_name = identify_message(message_hex_string, all_messages_rules_tokenized)
             for i, match in enumerate(ordered_message_names):
@@ -1323,28 +1405,29 @@ def cli_main():
                     validate_result = validate_message_by_name(match, message_hex_string, all_messages_rules_tokenized)
                     
                     if args["--verbose"] == True:
-                        explanation = "\n" + get_message_explanation_string(validate_result, validate_result[3], oneline_enabled, filter_fields=filter_fields, decode=args["--decode"])
+                        explanation = "\n" + get_message_explanation_string(validate_result, validate_result[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
                     else:
-                        explanation = get_message_explanation_string(validate_result, None, oneline_enabled, filter_fields=filter_fields, decode=args["--decode"])
+                        explanation = get_message_explanation_string(validate_result, None, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
                         
                     if validate_result[0] == False:
                         ret = 1
                 
                 name_string = match
-                if args["--long-name"] == False:
-                    name_string = re.sub(r'.*?([^\.]*)$', r'\1', match)
+                if args["--long-names"] == False:
+                    name_string = get_short_message_name(match)
+                number_of_whitespaces = get_max_message_name_length(all_messages_rules_tokenized, args["--long-names"]) - len(name_string) + 2
                     
                 if args["--list"] == False:
-                    if oneline_enabled:
-                        print(color  + f"[{name_string}]" + AnsiColors.ENDC + "\t" + explanation)
+                    if args["--format"] == "oneline" or args["--format"] == "compact":
+                        print(color  + f"[{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
                     else:
                         print(color  + f"[{name_string}]" + AnsiColors.ENDC)
                         print(explanation)
                         print()
                     break
                 else:
-                    if oneline_enabled:
-                        print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC + "\t" + explanation)
+                    if args["--format"] == "oneline" or args["--format"] == "compact":
+                        print(color  + f"{str(i): >8}: [{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
                     else:
                         print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
                         print(explanation)
