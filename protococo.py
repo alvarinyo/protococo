@@ -29,7 +29,7 @@ Options:
   
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from pprint import *
 from collections import OrderedDict
@@ -40,7 +40,8 @@ import json
 import copy
 from docopt import docopt
 
-# TODO: Esto pide a gritos como mínimo 3 clases: FieldRule (con byte_symbol, field_name y params), SpecialRule (con params), TitleRule (con message_name)
+
+TOKEN_DELIMITER = '$'
 
 def tokenize_rules(rules_string):
     lines = [line.strip() for line in rules_string.splitlines() if len(line.strip()) > 0]
@@ -49,18 +50,18 @@ def tokenize_rules(rules_string):
     for line in lines:
         tokenized_line = []
         
-        if line.count('#') == 0:
+        if line.count(TOKEN_DELIMITER) == 0:
             if (rule_is_title([line])):
                 tokenized_line += [line]
             else:
-                raise RuntimeError("Non-title rule without '#' character")
+                raise RuntimeError(f"Non-title rule without '{TOKEN_DELIMITER}' character")
         else:
         
             #left hand side
-            lhs = line[:line.index('#')].strip()
+            lhs = line[:line.index(TOKEN_DELIMITER)].strip()
             tokenized_line.append(lhs)
             #right hand side
-            rhs = line[line.strip().index('#')+1:]
+            rhs = line[line.strip().index(TOKEN_DELIMITER)+1:]
             tokenized_rhs = [token.strip() for token in rhs.split(',')]
             tokenized_line += tokenized_rhs
         
@@ -86,7 +87,7 @@ def rule_is_title(tokenized_rule):
     #print(f"{len(title_with_brackets)=}, {tokenized_rule[0]=}, {tokenized_rule[-1]=}")
     if len(tokenized_rule) != 1 or title_with_brackets[0] != '[' or title_with_brackets[-1] != ']':
         return False
-    elif tokenized_rule.count('#') > 0 or tokenized_rule.count(',') > 0:
+    elif tokenized_rule.count(TOKEN_DELIMITER) > 0 or tokenized_rule.count(',') > 0:
         raise RuntimeError("Unexpected character in title rule={tokenized_rule}")
     else:
         return True
@@ -1372,6 +1373,7 @@ def cli_main():
     
     ret = 0
         
+    
     all_messages_rules_tokenized = [tokenize_rules(r) for r in split_multimessage_rules(all_messages_string)]
     preprocess_encode_fields(all_messages_rules_tokenized)
     all_messages_rules_tokenized = preprocess_multiple_subtypeof(all_messages_rules_tokenized)
