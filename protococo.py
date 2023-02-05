@@ -42,32 +42,66 @@ from docopt import docopt
 
 
 TOKEN_DELIMITER = '$'
+COMMENT_DELIMITER = '#'
+
+def remove_comments(line):
+    if line.count(COMMENT_DELIMITER) == 0:
+        return line
+    
+    result = line.strip()
+    
+    if line.count(TOKEN_DELIMITER) == 0:
+        result = line[:line.index(COMMENT_DELIMITER)]
+    else:
+        lhs = line[:line.index(TOKEN_DELIMITER)].strip()
+        if COMMENT_DELIMITER in lhs:
+            open_parenthesis_count = 0
+            for i, c in enumerate(lhs):
+                if c=="(":
+                    open_parenthesis_count+=1
+                elif c==")":
+                    open_parenthesis_count-=1
+                if open_parenthesis_count < 0:
+                    raise RuntimeError("Unexpected ')'")
+                if c == COMMENT_DELIMITER and open_parenthesis_count == 0:
+                    result = line[:i]
+        else:
+            result = line[:line.index(COMMENT_DELIMITER)]
+    
+    return result.strip()
+
+def tokenize_line(line):
+    tokenized_rule = []
+        
+    if line.count(TOKEN_DELIMITER) == 0:
+        if (rule_is_title([line])):
+            tokenized_rule += [line]
+        else:
+            raise RuntimeError(f"Non-title rule without '{TOKEN_DELIMITER}' character")
+    else:
+    
+        #left hand side
+        lhs = line[:line.index(TOKEN_DELIMITER)].strip()
+        tokenized_rule.append(lhs)
+        #right hand side
+        rhs = line[line.strip().index(TOKEN_DELIMITER)+1:]
+        tokenized_rhs = [token.strip() for token in rhs.split(',')]
+        tokenized_rule += tokenized_rhs
+    
+    return tokenized_rule
 
 def tokenize_rules(rules_string):
     lines = [line.strip() for line in rules_string.splitlines() if len(line.strip()) > 0]
 
-    tokenized_lines = []
+    tokenized_rules = []
     for line in lines:
-        tokenized_line = []
-        
-        if line.count(TOKEN_DELIMITER) == 0:
-            if (rule_is_title([line])):
-                tokenized_line += [line]
-            else:
-                raise RuntimeError(f"Non-title rule without '{TOKEN_DELIMITER}' character")
-        else:
-        
-            #left hand side
-            lhs = line[:line.index(TOKEN_DELIMITER)].strip()
-            tokenized_line.append(lhs)
-            #right hand side
-            rhs = line[line.strip().index(TOKEN_DELIMITER)+1:]
-            tokenized_rhs = [token.strip() for token in rhs.split(',')]
-            tokenized_line += tokenized_rhs
-        
-        tokenized_lines.append(tokenized_line)
+        line = remove_comments(line)
+        if line == "":
+            continue
+        rule = tokenize_line(line)
+        tokenized_rules.append(rule)
     
-    return tokenized_lines
+    return tokenized_rules
 
 def rule_is_special(tokenized_rule):
     return tokenized_rule[0] == ""
@@ -947,7 +981,8 @@ def validate_message(message_rules, message, all_messages_rules_tokenized):
 
 
 def split_multimessage_rules(multimessage_rules_string):
-    multimessage_rules_string_without_empty_lines = os.linesep.join([s.strip() for s in multimessage_rules_string.splitlines() if s]) 
+    lines = [clean_line for line in multimessage_rules_string.splitlines() if (clean_line := remove_comments(line)) != '']
+    multimessage_rules_string_without_empty_lines = os.linesep.join(lines)
     list_of_message_rules = re.split("(\[[^\[]*)", multimessage_rules_string_without_empty_lines)
     list_of_message_rules = list(filter(lambda x: x!= "", list_of_message_rules))
     
