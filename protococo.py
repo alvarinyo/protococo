@@ -14,6 +14,7 @@ Usage:
   protococo json-recipe <message_names> ...
                       [--cocofile=<file>]
   protococo tree   [--cocofile=<file>]
+  protococo mspec  <message_name> [--cocofile=<file>]
 
 Options:
   -h --help                 Show this screen.
@@ -449,6 +450,13 @@ def cli_main():
     
     if args["tree"] == True:
         cocodoc.print_tree()
+    elif args["mspec"] == True:
+        message_specs = cocodoc.get_message_specs_by_short_name(args["<message_name>"])
+        l = len(message_specs)
+        if l > 1:
+            print(f"{l} coincidences found:\n")
+        print("\n".join([str(ms) for ms in message_specs]))
+
     elif args["check"] == True:
         messages_input = [sys.stdin.read()] if not args["<message_hex_string>"] else args["<message_hex_string>"]
         

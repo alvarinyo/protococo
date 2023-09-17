@@ -4,6 +4,8 @@ import copy
 from collections import OrderedDict
 from pprint import pprint
 
+from treelib import Node, Tree
+
 TOKEN_DELIMITER = '$'
 COMMENT_DELIMITER = '#'
 
@@ -617,15 +619,30 @@ def get_max_message_name_length(all_messages_rules_tokenized, long_names = False
             max_length = max(max_length, len(get_short_message_name(title_rule_get_name(message_rules[0]))))
     return max_length
 
-from treelib import Node, Tree
-
 class CocoMessageSpec(object):
     def __init__(self, full_message_name, preprocessed_rules):
         self.full_message_name = full_message_name
+        self.short_message_name = full_message_name[self.full_message_name.rfind('.')+1:]
         self.preprocessed_rules = preprocessed_rules
         self.conflicting_field_names = get_conflicting_field_names(self.preprocessed_rules)
 
-    # def get_direct_parent_name(self):
+        # print(self)
+
+    def __str__(self):
+        t = Tree()
+        t.create_node(self.short_message_name, self.full_message_name)
+        parent = t.root
+        for r in self.preprocessed_rules[1:]:
+            if rule_is_multifieldstart(r):
+                id = get_multifieldstart_full_name(r[1])
+                label = f'({id})'
+                parent = t.create_node(label, id, parent = parent).identifier
+            elif rule_is_multifieldend(r):
+                parent = t.parent(parent).identifier
+            else:
+                t.create_node(" ".join(r), " ".join(r), parent = parent)
+
+        return t.show(stdout = False)
 
 class CocoDocument(object):
     def __init__(self, all_messages_string):
@@ -636,10 +653,7 @@ class CocoDocument(object):
         self.message_specs = []
         for message_rules in self.all_messages_rules_tokenized:
             self.message_specs.append(CocoMessageSpec(title_rule_get_name(message_rules[0]), perform_subtypeof_overrides(message_rules, self.all_messages_rules_tokenized)))
-
-
             p = get_subtype_parents(self.message_specs[-1].full_message_name, self.all_messages_rules_tokenized, False, limit = 1)
-
 
         self.tree = Tree()
         self.tree.create_node("_", 0)
@@ -649,7 +663,7 @@ class CocoDocument(object):
                                          False, 
                                          limit = 1)
             parent = 0 if parent == [] else parent[0]
-            self.tree.create_node(message_spec.full_message_name[message_spec.full_message_name.rfind('.')+1:],
+            self.tree.create_node(message_spec.short_message_name,
                                   message_spec.full_message_name,
                                   parent = parent)
 
@@ -659,6 +673,13 @@ class CocoDocument(object):
             if ms.full_message_name == full_message_name:
                 return ms
         return None
+
+    def get_message_specs_by_short_name(self, message_name):
+        ret = []
+        for ms in self.message_specs:
+            if ms.short_message_name == message_name:
+                ret.append(ms)
+        return ret
 
     def print_tree(self):
         print(self.tree.show(stdout = False))
