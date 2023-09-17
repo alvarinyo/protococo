@@ -1544,6 +1544,8 @@ def cli_main():
 #TODO fix: override a 4 byte field with a 1 byte field. example: (0)   #encodedas littlendian with parent like XXXXXXXX
 #TODO feature: add encodedas json
 #TODO fix?: override field from different parent levels
+#TODO fix: throw parse error if can't override subtype (overriden field not existing in parent)
+#TODO fix: create fails with multi-subtypeof
 
             
 if __name__ == "__main__":
