@@ -31,17 +31,18 @@ if ! command -v tshark &> /dev/null; then
     exit 1
 fi
 
-# Use frame number filter for specific packet, or just -c for count from start
+# Build tshark command based on packet selection
 if [[ "$PACKET_NUM" -eq 1 ]]; then
-    FILTER_ARGS="-c $COUNT"
+    # For first packet(s), use -c count
+    TSHARK_CMD=(tshark -r "$PCAP_FILE" -c "$COUNT" -x)
 else
-    # For non-first packet, we need to use a display filter
+    # For non-first packet, use display filter
     END_PACKET=$((PACKET_NUM + COUNT - 1))
-    FILTER_ARGS="-Y frame.number>=$PACKET_NUM && frame.number<=$END_PACKET"
+    TSHARK_CMD=(tshark -r "$PCAP_FILE" -Y "frame.number>=$PACKET_NUM and frame.number<=$END_PACKET" -x)
 fi
 
 # Extract hex using tshark -x, parse the hex dump format
-tshark -r "$PCAP_FILE" $FILTER_ARGS -x 2>/dev/null | awk '
+"${TSHARK_CMD[@]}" 2>/dev/null | awk '
     /^[0-9a-f]{4}  / {
         # Each line starts with offset (4 hex chars), then 2 spaces, then hex bytes
         # Format: "0000  aa bb cc dd ..."
