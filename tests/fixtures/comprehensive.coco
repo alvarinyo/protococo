@@ -1,0 +1,63 @@
+version 1.0
+endian le
+
+// Constants
+const STX = 0x02
+const ETX = 0x03
+const PACKET_TYPE = 0x23
+
+// Enum definition
+enum CommandType : u8 {
+  CLOSE = 0x00,
+  OPEN = 0x01,
+  DATA = 0x02,
+  ACK = 0x03
+}
+
+// Base message
+message base_packet {
+  u8 stx = STX
+  u8 packet_type = PACKET_TYPE
+  u8 body_length
+  bytes body[body_length]
+  u16 checksum
+  u8 etx = ETX
+}
+
+// Child message with value override
+message data_packet extends base_packet {
+  packet_type = 0x24
+}
+
+// Message with enum field
+message command_message {
+  u8 stx = STX
+  CommandType cmd
+  u8 sequence
+  u8 data_length
+  bytes data[data_length]
+  u8 etx = ETX
+}
+
+// Message with string fields
+message text_message {
+  u8 stx = STX
+  u8 name_length
+  string name[name_length]
+  string:cstr description[]
+  u8 etx = ETX
+}
+
+// Message with attributes
+message annotated_message {
+  u8 msg_type [display: hex, doc: "Message type identifier"]
+  u16:be timestamp [display: decimal, doc: "Unix timestamp"]
+  bytes payload[] [doc: "Variable length payload"]
+}
+
+// Message with explicit endianness
+message mixed_endian {
+  u16:le little_val
+  u16:be big_val
+  u32 default_val
+}

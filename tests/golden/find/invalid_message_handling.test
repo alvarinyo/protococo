@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Find with invalid message shows validation errors
+
+COMMAND="python3 protococo.py find ff010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco --dissect --format=compact"
+EXPECTED_EXIT=1
+EXPECTED_OUTPUT="tests/golden/find/fixtures/invalid_message_handling.expected"

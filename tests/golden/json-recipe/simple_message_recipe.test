@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Generate JSON recipe schema for message type
+
+COMMAND="python3 protococo.py json-recipe simple_message --cocofile=tests/fixtures/foo.coco"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/json-recipe/fixtures/simple_message_recipe.expected"

@@ -1,0 +1,14 @@
+version 1.0
+endian le
+
+// A minimal test file for the new protococo parser
+
+const STX = 0xAA
+const ETX = 0xBB
+
+message simple {
+  u8 stx = STX
+  u8 length
+  bytes data[length]
+  u8 etx = ETX
+}

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Find with --decode displays decoded fields
+
+COMMAND="python3 protococo.py find aa010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco --dissect --decode --format=compact"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/find/fixtures/mime_message_decode.expected"

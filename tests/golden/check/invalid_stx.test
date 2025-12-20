@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Invalid start marker fails validation
+
+COMMAND="python3 protococo.py check simple_message ff010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco --format=compact"
+EXPECTED_EXIT=1
+EXPECTED_OUTPUT="tests/golden/check/fixtures/invalid_stx.expected"

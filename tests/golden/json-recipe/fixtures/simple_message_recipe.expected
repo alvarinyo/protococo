@@ -1,0 +1,28 @@
+[
+  {
+    "message_name": "simple_message",
+    "message_fields": [
+      {
+        "field_name": "msg_type",
+        "value": "<u8>",
+        "value_is_file_path": false,
+        "value_is_hex_string": false,
+        "should_encode": false
+      },
+      {
+        "field_name": "payload",
+        "value": "<bytes>",
+        "value_is_file_path": false,
+        "value_is_hex_string": true,
+        "should_encode": false
+      },
+      {
+        "field_name": "crc",
+        "value": "<u16>",
+        "value_is_file_path": false,
+        "value_is_hex_string": false,
+        "should_encode": false
+      }
+    ]
+  }
+]

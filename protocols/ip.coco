@@ -1,0 +1,302 @@
+version 1.0
+endian be
+
+// All fields are big-endian (network byte order)
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+// IP Protocol/Next Header numbers (shared by IPv4 and IPv6)
+enum Protocol : u8 {
+  ICMP = 1,
+  TCP = 6,
+  UDP = 17,
+  ICMPV6 = 58
+}
+
+// ICMP message types
+enum IcmpType : u8 {
+  ECHO_REPLY = 0,
+  DEST_UNREACHABLE = 3,
+  SOURCE_QUENCH = 4,
+  REDIRECT = 5,
+  ECHO_REQUEST = 8,
+  TIME_EXCEEDED = 11,
+  PARAMETER_PROBLEM = 12,
+  TIMESTAMP_REQUEST = 13,
+  TIMESTAMP_REPLY = 14
+}
+
+// TCP flags are defined inline as a bits field in tcp_segment
+
+// EtherType values (IEEE 802.3)
+enum EtherType : u16 {
+  IPV4 = 0x0800,
+  ARP = 0x0806,
+  VLAN = 0x8100,
+  IPV6 = 0x86DD
+}
+
+// ARP operation codes
+enum ArpOp : u16 {
+  REQUEST = 1,
+  REPLY = 2
+}
+
+// TCP option kinds (RFC 793, 1323, 2018, 7323)
+enum TcpOptKind : u8 {
+  END = 0,
+  NOP = 1,
+  MSS = 2,
+  WINDOW_SCALE = 3,
+  SACK_PERMITTED = 4,
+  SACK = 5,
+  TIMESTAMPS = 8
+}
+
+// ============================================================================
+// Transport Layer Protocols (reusable)
+// ============================================================================
+
+// Base TCP option - subtypes define specific options
+// Uses polymorphic array parsing: tcp_option[] tries all subtypes
+message tcp_option {
+  TcpOptKind kind
+}
+
+// Single-byte options (no length field)
+message tcp_option_nop extends tcp_option {
+  kind = TcpOptKind.NOP
+}
+
+message tcp_option_end extends tcp_option {
+  kind = TcpOptKind.END
+}
+
+// Multi-byte options (have length field)
+message tcp_option_mss extends tcp_option {
+  kind = TcpOptKind.MSS
+  u8 length = 0x04
+  u16 mss
+}
+
+message tcp_option_window_scale extends tcp_option {
+  kind = TcpOptKind.WINDOW_SCALE
+  u8 length = 0x03
+  u8 shift_count
+}
+
+message tcp_option_sack_permitted extends tcp_option {
+  kind = TcpOptKind.SACK_PERMITTED
+  u8 length = 0x02
+}
+
+message tcp_option_timestamps extends tcp_option {
+  kind = TcpOptKind.TIMESTAMPS
+  u8 length = 0x0A
+  u32 ts_val
+  u32 ts_ecr
+}
+
+// Fallback for unknown options (reads kind + length + data)
+message tcp_option_unknown extends tcp_option {
+  u8 length
+  bytes data[length - 2]
+}
+
+// TCP segment (RFC 793)
+// Bytes 12-13 contain data_offset (4b) + reserved (4b) + flags (8b) = 16 bits
+message tcp_segment {
+  u16 src_port [display: port]
+  u16 dst_port [display: port]
+  u32 seq_num
+  u32 ack_num
+  bits[16] data_offset_flags {
+    // Flags (low 8 bits) - bit 0 is fin, bit 7 is cwr
+    bit fin
+    bit syn
+    bit rst
+    bit psh
+    bit ack
+    bit urg
+    bit ece
+    bit cwr
+    // Reserved and data offset (high 8 bits)
+    bits[4] reserved
+    bits[4] data_offset
+  }
+  u16 window
+  u16 checksum
+  u16 urgent_ptr
+  // Options parsed as polymorphic array - tries all tcp_option subtypes
+  tcp_option options[data_offset_flags.data_offset * 4 - 20]
+  bytes data[]
+}
+
+// UDP datagram (RFC 768)
+message udp_datagram {
+  u16 src_port [display: port]
+  u16 dst_port [display: port]
+  u16 length
+  u16 checksum
+  bytes data[length - 8]
+}
+
+// ICMP message (RFC 792)
+message icmp_message {
+  IcmpType icmp_type
+  u8 code
+  u16 checksum
+  u16 identifier
+  u16 sequence
+  bytes data[]
+}
+
+// ============================================================================
+// ARP (RFC 826)
+// ============================================================================
+
+// ARP packet for IPv4 over Ethernet
+message arp_packet {
+  u16 hw_type           // 1 = Ethernet
+  u16 proto_type        // 0x0800 = IPv4
+  u8 hw_len             // 6 for Ethernet
+  u8 proto_len          // 4 for IPv4
+  ArpOp operation
+  bytes sender_mac[6] [display: mac]
+  u32 sender_ip [display: ipv4]
+  bytes target_mac[6] [display: mac]
+  u32 target_ip [display: ipv4]
+}
+
+// ============================================================================
+// IPv4 (RFC 791)
+// ============================================================================
+
+// IPv4 header (20 bytes minimum, no options)
+message ipv4_header {
+  bits[8] version_ihl {
+    bits[4] ihl
+    bits[4] version
+  }
+  u8 dscp_ecn
+  u16 total_length
+  u16 identification
+  bits[16] flags_fragment {
+    bits[13] fragment_offset
+    bit more_fragments      // MF flag
+    bit dont_fragment       // DF flag
+    bit reserved
+  }
+  u8 ttl
+  Protocol protocol
+  u16 header_checksum
+  u32 src_ip [display: ipv4]
+  u32 dst_ip [display: ipv4]
+}
+
+// IPv4 packet with polymorphic payload based on protocol field
+message ipv4_packet {
+  ipv4_header header
+  bytes payload[header.total_length - 20] match header.protocol {
+    Protocol.TCP -> {
+      tcp_segment tcp
+    }
+    Protocol.UDP -> {
+      udp_datagram udp
+    }
+    Protocol.ICMP -> {
+      icmp_message icmp
+    }
+    _ -> {}
+  }
+}
+
+// ============================================================================
+// IPv6 (RFC 8200)
+// ============================================================================
+
+// IPv6 header (40 bytes fixed, no options in base header)
+message ipv6_header {
+  bits[32] version_tc_flow {
+    bits[20] flow_label
+    bits[8] traffic_class
+    bits[4] version           // Always 6
+  }
+  u16 payload_length
+  Protocol next_header        // Same as IPv4 protocol field
+  u8 hop_limit
+  bytes src_ip[16] [display: ipv6]
+  bytes dst_ip[16] [display: ipv6]
+}
+
+// IPv6 packet with polymorphic payload based on next_header field
+message ipv6_packet {
+  ipv6_header header
+  bytes payload[header.payload_length] match header.next_header {
+    Protocol.TCP -> {
+      tcp_segment tcp
+    }
+    Protocol.UDP -> {
+      udp_datagram udp
+    }
+    Protocol.ICMPV6 -> {
+      icmp_message icmpv6
+    }
+    _ -> {}
+  }
+}
+
+// ============================================================================
+// Ethernet (IEEE 802.3)
+// ============================================================================
+
+// Ethernet header (14 bytes)
+message ethernet_header {
+  bytes dst_mac[6] [display: mac]
+  bytes src_mac[6] [display: mac]
+  EtherType ethertype
+}
+
+// 802.1Q VLAN tag (4 bytes total, but ethertype already consumed)
+message vlan_tag {
+  bits[16] tci {
+    bits[12] vlan_id
+    bit dei               // Drop Eligible Indicator
+    bits[3] pcp           // Priority Code Point
+  }
+  EtherType inner_ethertype
+}
+
+// Ethernet frame with polymorphic payload based on ethertype
+message ethernet_frame {
+  ethernet_header eth
+  bytes payload[] match eth.ethertype {
+    EtherType.IPV4 -> {
+      ipv4_packet ip
+    }
+    EtherType.IPV6 -> {
+      ipv6_packet ip6
+    }
+    EtherType.ARP -> {
+      arp_packet arp
+    }
+    EtherType.VLAN -> {
+      vlan_tag vlan
+      bytes inner[] match vlan.inner_ethertype {
+        EtherType.IPV4 -> {
+          ipv4_packet ip
+        }
+        EtherType.IPV6 -> {
+          ipv6_packet ip6
+        }
+        EtherType.ARP -> {
+          arp_packet arp
+        }
+        _ -> {}
+      }
+    }
+    _ -> {}
+  }
+}

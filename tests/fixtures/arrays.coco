@@ -1,0 +1,42 @@
+version 1.0
+endian le
+
+// Test array of structures
+
+const STX = 0x02
+const ETX = 0x03
+
+// Self-delimiting item (has internal length)
+message item {
+  u8 item_type
+  u8 data_length
+  bytes data[data_length]
+}
+
+// Fixed-size item
+message fixed_item {
+  u8 type
+  u16 value
+}
+
+// Container with array of variable-length items
+message container {
+  u8 stx = STX
+  u8 item_count
+  item items[item_count]
+  u8 etx = ETX
+}
+
+// Container with array of fixed-size items
+message fixed_container {
+  u8 stx = STX
+  u8 item_count
+  fixed_item items[item_count]
+  u8 etx = ETX
+}
+
+// Simple TLV-style message
+message tlv_list {
+  u8 count
+  item entries[count]
+}

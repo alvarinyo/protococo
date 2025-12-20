@@ -1,0 +1,43 @@
+version 1.0
+endian le
+
+// Generic test protocol for protococo golden tests
+// This is a fictional protocol designed to test protococo features
+
+const STX = 0xAA
+const ETX = 0xBB
+
+message simple_message {
+  u8 stx = STX              // START MARKER
+  u8 msg_type               // MESSAGE TYPE
+  u8 payload_length         // PAYLOAD LENGTH
+  bytes payload[payload_length]  // PAYLOAD
+  u16 crc                   // CRC
+  u8 etx = ETX              // END MARKER
+}
+
+message extended_message {
+  u8 stx = STX              // START MARKER
+  u8 msg_type = 0xFF        // EXTENDED TYPE
+  u16 payload_length        // PAYLOAD LENGTH
+  u8 seq_num                // SEQUENCE NUMBER
+  bytes payload[payload_length]  // PAYLOAD
+  u16 crc                   // CRC
+  u8 etx = ETX              // END MARKER
+}
+
+message text_message extends simple_message {
+  msg_type = 0x01           // TEXT MESSAGE
+  payload {
+    u8 text_length          // TEXT LENGTH
+    string text[text_length] // TEXT CONTENT
+  }
+}
+
+message data_message extends simple_message {
+  msg_type = 0x02           // DATA MESSAGE
+  payload {
+    u32 data_size           // DATA SIZE
+    bytes blob[data_size]   // DATA BLOB
+  }
+}

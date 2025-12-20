@@ -1,0 +1,42 @@
+version 1.0
+endian le
+
+// Default protocol definitions for protococo
+// This is a minimal example - see default_v020.coco for the full protocol
+
+const STX = 0x02
+const ETX = 0x03
+
+// Base message with 1-byte length field
+message base_1byte {
+  u8 stx = STX               // Start marker
+  u8 msg_type                // Message type
+  u8 body_length             // Body length
+  bytes body[body_length]    // Message body
+  u8 etx = ETX               // End marker
+}
+
+// Base message with 2-byte length field
+message base_2byte {
+  u8 stx = STX               // Start marker
+  u8 msg_type                // Message type
+  u16 body_length            // Body length
+  bytes body[body_length]    // Message body
+  u8 etx = ETX               // End marker
+}
+
+// Binary data packet with checksum
+message binary_data_packet extends base_1byte {
+  msg_type = 0x23            // Binary data packet type
+  body {
+    bytes data[]             // Binary data
+  }
+}
+
+// Generic response message
+message response extends base_1byte {
+  body {
+    u8 status                // Status code
+    bytes payload[]          // Response payload
+  }
+}

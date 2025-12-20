@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Find command identifies message type
+
+COMMAND="python3 protococo.py find aa010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/find/fixtures/mime_message.expected"

@@ -1,0 +1,2 @@
+|stx|msg_type|payload_length| payload  |crc |etx|
+|[1m[92maa[0m |   [1m[92m01[0m   |      [1m[92m05[0m      |[1m[92m48656c6c6f[0m|[1m[92m1234[0m|[1m[92mbb[0m |

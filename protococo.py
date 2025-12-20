@@ -3,18 +3,21 @@
 
 Usage:
   protococo check  <message_name> [<message_hex_string> ...]
-                      [--cocofile=<file> --format=<option>] 
-                      [--verbose --decode --decode-no-newlines]
+                      [--cocofile=<file> --format=<option>]
+                      [--verbose --decode --decode-no-newlines --tree]
+                      [--field-bytes-limit=<n>]
   protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
-                      [--list --verbose --decode --decode-no-newlines --long-names]
+                      [--list --verbose --decode --decode-no-newlines --long-names --tree]
+                      [--field-bytes-limit=<n>]
   protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
   protococo json-recipe <message_names> ...
                       [--cocofile=<file>]
   protococo tree   [--cocofile=<file>]
   protococo mspec  <message_name> [--cocofile=<file>]
+  protococo wireshark [<message_name>] [--cocofile=<file>]
 
 Options:
   -h --help                 Show this screen.
@@ -22,16 +25,22 @@ Options:
   --cocofile=<file>         Specify the protococo rules file [default: default.coco].
   --verbose                 Enable verbose output.
   --format=<option>         Print message disection in different formats [default: compact].
-                                Options: oneline, multiline, compact.
+                                Options: oneline, multiline, compact, porcelain, json, tree.
+                                porcelain: machine-readable space-padded columns, no colors.
+                                json: structured JSON output.
+                                tree: hierarchical tree structure with box-drawing chars.
   --dissect                 Include message field dissection in find results.
   --decode                  Decodes fields with encodedas parameters in message dissection
   --decode-no-newlines      Replaces new lines in decoded fields of message dissections with \'\\n\' for a more compact output
   --long-names              Prints the full mangled message names if a name mangling preprocess has been made during cocofile parsing
   --list                    Include a list of the most fitting messages in find results.
-  
+  --tree                    Display dissected fields as a tree structure.
+  --field-bytes-limit=<n>   Truncate long field values to N bytes in output [default: 8].
+                                Use 0 for unlimited.
+
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from pprint import *
 from collections import OrderedDict
@@ -41,8 +50,92 @@ import sys
 import json
 import copy
 from docopt import docopt
-from parser import *
-from analyzer import *
+from parser import parse, ParseError
+from analyzer import Decoder, ValidationResult, DecodeResult, FieldValue
+from encoder import Encoder
+from coco_ast import EnumTypeRef
+import formatters
+
+
+def truncate_field_value(value: str, limit_bytes: int) -> str:
+    """Truncate a hex string or text value to the given byte limit.
+
+    Args:
+        value: Hex string or text value
+        limit_bytes: Maximum bytes to show (0 = unlimited)
+
+    Returns:
+        Truncated value with "+N" suffix showing omitted bytes
+    """
+    if limit_bytes <= 0 or not value:
+        return value
+
+    # Check if it's a hex string (all hex chars)
+    is_hex = all(c in '0123456789abcdefABCDEF' for c in value)
+
+    if is_hex:
+        # Hex string: 2 chars per byte
+        total_bytes = len(value) // 2
+        if total_bytes <= limit_bytes:
+            return value
+        truncated = value[:limit_bytes * 2]
+        omitted = total_bytes - limit_bytes
+        return f"{truncated}...+{omitted}B"
+    else:
+        # Text string: 1 char per byte (approximately)
+        total_bytes = len(value)
+        if total_bytes <= limit_bytes:
+            return value
+        truncated = value[:limit_bytes]
+        omitted = total_bytes - limit_bytes
+        return f"{truncated}...+{omitted}B"
+
+
+def collect_field_metadata(decoder: Decoder, msg, prefix: str = "") -> dict:
+    """Recursively collect field metadata including from embedded messages.
+
+    Args:
+        decoder: Decoder instance
+        msg: Message definition
+        prefix: Path prefix for nested fields
+
+    Returns:
+        Dict mapping field paths to Field objects
+    """
+    metadata = {}
+    fields = decoder.resolve_message(msg)
+
+    def collect_from_fields(fields_list: list, field_prefix: str):
+        """Helper to collect metadata from a list of fields."""
+        for field in fields_list:
+            field_key = f"{field_prefix}{field.name}" if field_prefix else field.name
+            metadata[field_key] = field
+
+            # Check for embedded message
+            if isinstance(field.type, EnumTypeRef):
+                embedded_msg = decoder.coco_file.get_message(field.type.enum_name)
+                if embedded_msg:
+                    # Recursively collect from embedded message
+                    if field.structure_body:
+                        # Use overridden structure
+                        collect_from_fields(field.structure_body, f"{field_key}.")
+                    else:
+                        # Use original message fields
+                        nested = collect_field_metadata(decoder, embedded_msg, f"{field_key}.")
+                        metadata.update(nested)
+
+            # Check for structure body (structure override on bytes field)
+            if field.structure_body and not isinstance(field.type, EnumTypeRef):
+                collect_from_fields(field.structure_body, f"{field_key}.")
+
+            # Check for match clause - traverse all branches
+            if field.match_clause:
+                for branch in field.match_clause.branches:
+                    if branch.fields:
+                        collect_from_fields(branch.fields, f"{field_key}.")
+
+    collect_from_fields(fields, prefix)
+    return metadata
 
 
 class AnsiColors:
@@ -57,14 +150,145 @@ class AnsiColors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     UNDERLINE_OFF = '\033[24m'
+
+
+def field_matches_filter(field_name: str, field_path: str, filter_fields: list) -> bool:
+    """Check if a field matches any of the filter patterns.
+
+    Args:
+        field_name: Simple field name (e.g., "protocol")
+        field_path: Full dotted path (e.g., "header.protocol")
+        filter_fields: List of filter patterns (simple names or dotted paths)
+
+    Returns:
+        True if the field matches any filter pattern
+    """
+    if filter_fields is None:
+        return True
+
+    # Use field_path if available, otherwise field_name
+    effective_path = field_path if field_path else field_name
+
+    for pattern in filter_fields:
+        # Exact match on simple name
+        if field_name == pattern:
+            return True
+        # Exact match on full path
+        if effective_path == pattern:
+            return True
+        # Pattern is a dotted path - check if field_path ends with it
+        if '.' in pattern:
+            if effective_path == pattern or effective_path.endswith('.' + pattern):
+                return True
+            # Field is a prefix of the pattern (e.g., "content" matches "content.text")
+            if pattern.startswith(field_name + '.') or pattern.startswith(effective_path + '.'):
+                return True
+
+    return False
+
+
+def validation_result_to_tuple(result: ValidationResult):
+    """Convert new ValidationResult to old 5-tuple format for display functions.
+
+    Old format:
+    - [0] is_valid (bool)
+    - [1] validation_result_dict (OrderedDict field_name -> hex_value)
+    - [2] validation_diff_dict (dict field_name -> bool compliance)
+    - [3] validation_log_dict (dict field_name -> list of error messages)
+    - [4] validation_decoded_dict (dict field_name -> decoded value string)
+    """
+    validation_result_dict = OrderedDict()
+    validation_diff_dict = {}
+    validation_log_dict = {}
+    validation_decoded_dict = {}
+
+    # Track field name occurrences to make duplicates unique
+    name_counts = {}
+
+    def extract_val(v):
+        """Extract the decoded value from FieldValue or return as-is."""
+        if isinstance(v, FieldValue):
+            return v.val
+        return v
+
+    def dict_to_plain(d: dict) -> dict:
+        """Convert a dict with FieldValue objects to a plain dict with just values."""
+        result = {}
+        for k, v in d.items():
+            actual_val = extract_val(v)
+            if isinstance(actual_val, dict):
+                result[k] = dict_to_plain(actual_val)
+            elif isinstance(actual_val, list):
+                result[k] = [extract_val(item) if not isinstance(extract_val(item), dict)
+                            else dict_to_plain(extract_val(item)) for item in actual_val]
+            else:
+                result[k] = actual_val
+        return result
+
+    def flatten_to_decoded(d: dict, parent_path: str):
+        """Recursively flatten nested dict into validation_decoded_dict for filtering."""
+        for k, v in d.items():
+            field_path = f"{parent_path}.{k}"
+            # Extract value from FieldValue if present
+            actual_val = extract_val(v)
+            if isinstance(actual_val, dict):
+                flatten_to_decoded(actual_val, field_path)
+            elif isinstance(actual_val, list):
+                # Convert list items, extracting from FieldValue
+                converted_list = [extract_val(item) for item in actual_val]
+                validation_decoded_dict[field_path] = str(converted_list)
+            else:
+                validation_decoded_dict[field_path] = str(actual_val)
+
+    for field in result.fields:
+        # Make field names unique if they appear multiple times
+        base_name = field.name
+        if base_name in name_counts:
+            name_counts[base_name] += 1
+            unique_name = f"{base_name}_{name_counts[base_name]}"
+        else:
+            name_counts[base_name] = 0
+            unique_name = base_name
+
+        validation_result_dict[unique_name] = field.hex_value
+        validation_diff_dict[unique_name] = field.is_valid
+
+        if field.errors:
+            validation_log_dict[unique_name] = field.errors
+
+        if field.decoded_value is not None:
+            if isinstance(field.decoded_value, dict):
+                # Flatten nested structure for path-based filtering
+                flatten_to_decoded(field.decoded_value, unique_name)
+                # Convert to plain dict (without FieldValue wrappers) for string representation
+                validation_decoded_dict[unique_name] = str(dict_to_plain(field.decoded_value))
+            elif isinstance(field.decoded_value, str):
+                validation_decoded_dict[unique_name] = field.decoded_value
+            else:
+                validation_decoded_dict[unique_name] = str(field.decoded_value)
+
+    # Add remaining bytes as overflow field if present
+    if result.remaining_bytes:
+        validation_result_dict[None] = result.remaining_bytes
+        validation_diff_dict[None] = False
+
+    return (
+        result.is_valid,
+        validation_result_dict,
+        validation_diff_dict,
+        validation_log_dict,
+        validation_decoded_dict
+    )
     
 def get_message_explanation_string_compact(validation_result, filter_fields = None, decode=False, no_newlines=False):
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
-    
+
     result_string = ""
     odd = 0
     for k, v in validation_result_dict.items():
-        if filter_fields is not None and k not in filter_fields:
+        # Use path-based filtering - k is the field path (e.g., "header.protocol")
+        field_name = k.split('.')[-1] if k and '.' in k else k
+        if not field_matches_filter(field_name, k, filter_fields):
             continue
         
         odd ^= 1
@@ -101,15 +325,17 @@ def get_message_explanation_string_compact(validation_result, filter_fields = No
     return result_string
 
 def get_message_explanation_string_oneline(validation_result, filter_fields = None, decode=False, no_newlines=False):
-    
+
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
-    
+
     fail_color = AnsiColors.FAIL
     ok_color = AnsiColors.OKGREEN
 
     result_string = ""
     for k, v in validation_result_dict.items():
-        if filter_fields is not None and k not in filter_fields:
+        # Use path-based filtering - k is the field path (e.g., "header.protocol")
+        field_name = k.split('.')[-1] if k and '.' in k else k
+        if not field_matches_filter(field_name, k, filter_fields):
             continue
         
         field_complies = validation_diff_dict[k]
@@ -144,16 +370,18 @@ def get_message_explanation_string_oneline(validation_result, filter_fields = No
     return result_string
 
 def get_message_explanation_string_multiline(validation_result, filter_fields = None, decode=False, no_newlines=False):
-    
+
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
-    
+
     fail_color = AnsiColors.FAIL
     ok_color = AnsiColors.OKGREEN
 
     result_string_field_names = ""
     result_string_field_values = ""
     for k, v in validation_result_dict.items():
-        if filter_fields is not None and k not in filter_fields:
+        # Use path-based filtering - k is the field path (e.g., "header.protocol")
+        field_name = k.split('.')[-1] if k and '.' in k else k
+        if not field_matches_filter(field_name, k, filter_fields):
             continue
         
         field_complies = validation_diff_dict[k]
@@ -205,10 +433,419 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
     
     return result_string_field_names + "\n" + result_string_field_values
 
+def get_message_explanation_string_tree(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32):
+    """Format validation result as a tree structure.
+
+    Args:
+        validation_result: The ValidationResult object (not tuple)
+        fields_metadata: Dict mapping field names to Field objects (for display attributes)
+        decode: Whether to decode values using display formatters
+        filter_fields: List of field names/paths to include (None = all fields)
+        coco_file: CocoFile for looking up enum values (for "N (Enum.Member)" format)
+        field_bytes_limit: Maximum bytes to show for field values (0 = unlimited)
+    """
+    lines = []
+
+    def format_enum_display(value: str) -> str:
+        """Format enum value as 'N (Enum.Member)' if possible."""
+        if not decode or not coco_file or not isinstance(value, str):
+            return value
+        # Check if value looks like "EnumName.MemberName"
+        if '.' in value and not value.startswith('0x'):
+            parts = value.split('.', 1)
+            if len(parts) == 2:
+                enum_name, member_name = parts
+                enum_def = coco_file.get_enum(enum_name)
+                if enum_def:
+                    member = enum_def.get_member_by_name(member_name)
+                    if member:
+                        return f"{member.value} ({value})"
+        return value
+
+    def has_matching_descendants(d: dict, parent_path: str) -> bool:
+        """Check if any descendant field matches the filter."""
+        if filter_fields is None:
+            return True
+        for k, v in d.items():
+            field_path = f"{parent_path}.{k}" if parent_path else k
+            # Extract actual value from FieldValue if present
+            actual_val = v.val if isinstance(v, FieldValue) else v
+            if field_matches_filter(k, field_path, filter_fields):
+                return True
+            if isinstance(actual_val, dict) and has_matching_descendants(actual_val, field_path):
+                return True
+            if isinstance(actual_val, list):
+                for j, item in enumerate(actual_val):
+                    if isinstance(item, dict) and has_matching_descendants(item, f"{field_path}[{j}]"):
+                        return True
+        return False
+
+    def format_value(field_result: DecodeResult, metadata=None) -> str:
+        """Format a single field's value."""
+        hex_val = field_result.hex_value
+        decoded = field_result.decoded_value
+
+        # If decode=False, always return raw hex (truncated if needed)
+        if not decode:
+            if isinstance(decoded, dict):
+                # Nested structure - will be handled recursively
+                return None
+            return truncate_field_value(hex_val, field_bytes_limit)
+
+        # decode=True: apply formatters and use decoded value
+        if metadata and metadata.attributes and metadata.attributes.display:
+            fmt_name = metadata.attributes.display.name
+            formatted = formatters.format_value(fmt_name, hex_val)
+            if formatted:
+                return formatted  # Formatted values (like IP addresses) are not truncated
+
+        # Use decoded value if available
+        if decoded is not None:
+            if isinstance(decoded, dict):
+                # Nested structure - will be handled recursively
+                return None
+            elif isinstance(decoded, str):
+                # Check if it's an enum value (don't truncate) or raw hex/text (truncate)
+                formatted = format_enum_display(decoded)
+                if formatted != decoded:
+                    # It was formatted as an enum, don't truncate
+                    return formatted
+                # Check if it looks like hex or plain text
+                return truncate_field_value(decoded, field_bytes_limit)
+            else:
+                return str(decoded)
+
+        return truncate_field_value(hex_val, field_bytes_limit)
+
+    def build_prefix(ancestors: list[bool]) -> str:
+        """Build prefix string from ancestor continuation flags.
+
+        Args:
+            ancestors: List of booleans, True if that ancestor level needs a continuation line (│)
+        """
+        prefix = ""
+        for needs_line in ancestors:
+            prefix += "│   " if needs_line else "    "
+        return prefix
+
+    def add_field(field_result: DecodeResult, ancestors: list[bool] = None, metadata=None, is_last=False, parent_path: str = ""):
+        """Add a field to the tree."""
+        if ancestors is None:
+            ancestors = []
+
+        name = field_result.name if field_result.name else "+"
+        field_path = f"{parent_path}.{name}" if parent_path else name
+
+        # Check if this field or any descendants match the filter
+        self_matches = field_matches_filter(name, field_path, filter_fields)
+        has_nested = isinstance(field_result.decoded_value, dict)
+        descendants_match = has_nested and has_matching_descendants(field_result.decoded_value, field_path)
+
+        if not self_matches and not descendants_match:
+            return
+
+        prefix = build_prefix(ancestors)
+        connector = "└── " if is_last else "├── "
+
+        # Color based on validity
+        if field_result.is_valid:
+            color = AnsiColors.OKGREEN
+        else:
+            color = AnsiColors.FAIL
+
+        value = format_value(field_result, metadata)
+
+        if value is not None:
+            lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{name}{AnsiColors.ENDC}: {color}{value}{AnsiColors.ENDC}")
+        else:
+            # Nested structure
+            lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{name}{AnsiColors.ENDC}:")
+            if has_nested:
+                # Pass down whether this level needs continuation
+                new_ancestors = ancestors + [not is_last]
+                add_nested_dict(field_result.decoded_value, new_ancestors, field_path)
+
+    def add_nested_dict(d: dict, ancestors: list[bool], parent_path: str = ""):
+        """Add a nested dict to the tree. Values are FieldValue objects."""
+        # Filter items to only those that match or have matching descendants
+        filtered_items = []
+        for k, v in d.items():
+            field_path = f"{parent_path}.{k}" if parent_path else k
+            # Extract the actual value from FieldValue if present
+            actual_val = v.val if isinstance(v, FieldValue) else v
+            self_matches = field_matches_filter(k, field_path, filter_fields)
+            has_nested = isinstance(actual_val, dict)
+            descendants_match = has_nested and has_matching_descendants(actual_val, field_path)
+            is_list_with_matches = isinstance(actual_val, list) and any(
+                isinstance(item, dict) and has_matching_descendants(item, f"{field_path}[{j}]")
+                for j, item in enumerate(actual_val)
+            )
+            if self_matches or descendants_match or is_list_with_matches:
+                filtered_items.append((k, v))
+
+        prefix = build_prefix(ancestors)
+
+        for i, (k, v) in enumerate(filtered_items):
+            is_last = (i == len(filtered_items) - 1)
+            connector = "└── " if is_last else "├── "
+
+            # Build field path for metadata lookup
+            field_path = f"{parent_path}.{k}" if parent_path else k
+
+            # Extract hex and decoded value from FieldValue
+            if isinstance(v, FieldValue):
+                hex_val = v.hex
+                actual_val = v.val
+            else:
+                hex_val = str(v)
+                actual_val = v
+
+            if isinstance(actual_val, dict):
+                lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:")
+                new_ancestors = ancestors + [not is_last]
+                add_nested_dict(actual_val, new_ancestors, field_path)
+            elif isinstance(actual_val, list):
+                lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{k}{AnsiColors.ENDC}: [{len(actual_val)} items]")
+                list_ancestors = ancestors + [not is_last]
+                list_prefix = build_prefix(list_ancestors)
+                for j, item in enumerate(actual_val):
+                    item_is_last = (j == len(actual_val) - 1)
+                    item_connector = "└── " if item_is_last else "├── "
+                    if isinstance(item, dict):
+                        lines.append(f"{list_prefix}{item_connector}[{j}]:")
+                        item_ancestors = list_ancestors + [not item_is_last]
+                        add_nested_dict(item, item_ancestors, f"{field_path}[{j}]")
+                    else:
+                        # List items that are FieldValue
+                        if isinstance(item, FieldValue):
+                            item_display = item.hex if not decode else str(item.val)
+                        else:
+                            item_display = str(item)
+                        # Apply truncation to list items
+                        if isinstance(item_display, str):
+                            item_display = truncate_field_value(item_display, field_bytes_limit)
+                        lines.append(f"{list_prefix}{item_connector}[{j}]: {AnsiColors.OKGREEN}{item_display}{AnsiColors.ENDC}")
+            else:
+                color = AnsiColors.OKGREEN
+                skip_truncation = False
+
+                # Choose hex or decoded value based on decode flag
+                if not decode:
+                    formatted_value = hex_val
+                else:
+                    formatted_value = actual_val
+
+                    # Try to apply display formatter from metadata
+                    if fields_metadata:
+                        metadata = fields_metadata.get(field_path) or fields_metadata.get(k)
+                        if metadata and metadata.attributes and metadata.attributes.display:
+                            fmt_name = metadata.attributes.display.name
+                            formatted = formatters.format_value(fmt_name, hex_val)
+                            if formatted:
+                                formatted_value = formatted
+                                skip_truncation = True  # Don't truncate formatted values (like IP addresses)
+
+                    # Apply enum formatting for string values that look like enums
+                    if isinstance(formatted_value, str):
+                        enum_formatted = format_enum_display(formatted_value)
+                        if enum_formatted != formatted_value:
+                            formatted_value = enum_formatted
+                            skip_truncation = True  # Don't truncate enum values
+
+                # Apply truncation if needed
+                if not skip_truncation and isinstance(formatted_value, str):
+                    formatted_value = truncate_field_value(formatted_value, field_bytes_limit)
+
+                lines.append(f"{prefix}{connector}{k}: {color}{formatted_value}{AnsiColors.ENDC}")
+
+    # Process all fields - filter to only show relevant ones
+    visible_fields = []
+    for i, field in enumerate(validation_result.fields):
+        name = field.name if field.name else "+"
+        field_path = name
+        self_matches = field_matches_filter(name, field_path, filter_fields)
+        has_nested = isinstance(field.decoded_value, dict)
+        descendants_match = has_nested and has_matching_descendants(field.decoded_value, field_path)
+        if self_matches or descendants_match:
+            visible_fields.append(field)
+
+    for i, field in enumerate(visible_fields):
+        is_last = (i == len(visible_fields) - 1) and not validation_result.remaining_bytes
+        metadata = fields_metadata.get(field.name) if fields_metadata else None
+        add_field(field, ancestors=[], metadata=metadata, is_last=is_last)
+
+    # Add remaining bytes if any (only if no filter or filter is None)
+    if validation_result.remaining_bytes and filter_fields is None:
+        lines.append(f"└── {AnsiColors.BOLD}+remaining{AnsiColors.ENDC}: {AnsiColors.FAIL}{validation_result.remaining_bytes}{AnsiColors.ENDC}")
+
+    return "\n".join(lines)
+
+
+def get_message_explanation_string_porcelain(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32, message_name: str = None):
+    """Format validation result as porcelain (machine-readable, space-padded columns).
+
+    Format: STATUS  PATH  HEX  DECODED
+    STATUS is OK or ERR
+    Columns are space-padded for alignment. No colors, easy to parse.
+    """
+    # Collect rows as tuples: (status, path, hex, decoded)
+    rows = []
+
+    # Add message name header row if provided
+    if message_name:
+        status = "OK" if validation_result.is_valid else "ERR"
+        rows.append((status, message_name, "", ""))
+
+    def format_decoded(value, hex_val: str, metadata=None) -> str:
+        """Format decoded value for display."""
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            return ""  # Nested structures handled separately
+        if isinstance(value, list):
+            return f"[{len(value)} items]"
+
+        result = str(value)
+
+        # Apply display formatter if available
+        if decode and metadata and metadata.attributes and metadata.attributes.display:
+            fmt_name = metadata.attributes.display.name
+            formatted = formatters.format_value(fmt_name, hex_val)
+            if formatted:
+                result = formatted
+
+        # Apply truncation
+        if field_bytes_limit > 0:
+            result = truncate_field_value(result, field_bytes_limit)
+
+        return result
+
+    def flatten_field(field_result: DecodeResult, path: str = "", metadata=None):
+        """Recursively flatten a field result into lines."""
+        name = field_result.name if field_result.name else "+remaining"
+        field_path = f"{path}.{name}" if path else name
+
+        # Check filter
+        if filter_fields is not None:
+            if not field_matches_filter(name, field_path, filter_fields):
+                # Check if any descendants match
+                if not isinstance(field_result.decoded_value, dict):
+                    return
+
+        status = "OK" if field_result.is_valid else "ERR"
+        hex_val = field_result.hex_value
+        if field_bytes_limit > 0:
+            hex_val = truncate_field_value(hex_val, field_bytes_limit)
+
+        decoded = format_decoded(field_result.decoded_value, field_result.hex_value, metadata)
+
+        # Output this field if it's a leaf or has a simple value
+        if not isinstance(field_result.decoded_value, dict):
+            rows.append((status, field_path, hex_val, decoded))
+        else:
+            # Nested structure - recurse
+            flatten_dict(field_result.decoded_value, field_path, field_result.is_valid)
+
+    def flatten_dict(d: dict, parent_path: str, parent_valid: bool = True):
+        """Recursively flatten a nested dict."""
+        for k, v in d.items():
+            field_path = f"{parent_path}.{k}"
+
+            # Check filter
+            if filter_fields is not None and not field_matches_filter(k, field_path, filter_fields):
+                # Check descendants for dicts
+                actual_val = v.val if isinstance(v, FieldValue) else v
+                if isinstance(actual_val, dict):
+                    flatten_dict(actual_val, field_path, parent_valid)
+                continue
+
+            # Extract from FieldValue
+            if isinstance(v, FieldValue):
+                hex_val = v.hex
+                actual_val = v.val
+            else:
+                hex_val = str(v) if not isinstance(v, (dict, list)) else ""
+                actual_val = v
+
+            if isinstance(actual_val, dict):
+                flatten_dict(actual_val, field_path, parent_valid)
+            elif isinstance(actual_val, list):
+                status = "OK" if parent_valid else "ERR"
+                rows.append((status, field_path, "", f"[{len(actual_val)} items]"))
+                for i, item in enumerate(actual_val):
+                    item_path = f"{field_path}[{i}]"
+                    if isinstance(item, dict):
+                        flatten_dict(item, item_path, parent_valid)
+                    elif isinstance(item, FieldValue):
+                        item_hex = truncate_field_value(item.hex, field_bytes_limit) if field_bytes_limit > 0 else item.hex
+                        item_val = str(item.val)
+                        if field_bytes_limit > 0:
+                            item_val = truncate_field_value(item_val, field_bytes_limit)
+                        rows.append((status, item_path, item_hex, item_val))
+                    else:
+                        item_str = str(item)
+                        if field_bytes_limit > 0:
+                            item_str = truncate_field_value(item_str, field_bytes_limit)
+                        rows.append((status, item_path, "", item_str))
+            else:
+                status = "OK" if parent_valid else "ERR"
+
+                # Apply display formatter if available
+                decoded_str = str(actual_val) if actual_val is not None else ""
+                if decode and fields_metadata:
+                    metadata = fields_metadata.get(k) or fields_metadata.get(field_path)
+                    if metadata and metadata.attributes and metadata.attributes.display:
+                        fmt_name = metadata.attributes.display.name
+                        # Use original hex for formatting (before truncation)
+                        original_hex = v.hex if isinstance(v, FieldValue) else hex_val
+                        formatted = formatters.format_value(fmt_name, original_hex)
+                        if formatted:
+                            decoded_str = formatted
+
+                if field_bytes_limit > 0:
+                    hex_val = truncate_field_value(hex_val, field_bytes_limit)
+                    decoded_str = truncate_field_value(decoded_str, field_bytes_limit)
+                rows.append((status, field_path, hex_val, decoded_str))
+
+    # Process all fields
+    for field in validation_result.fields:
+        metadata = fields_metadata.get(field.name) if fields_metadata else None
+        flatten_field(field, "", metadata)
+
+    # Add remaining bytes if any
+    if validation_result.remaining_bytes:
+        remaining = validation_result.remaining_bytes
+        if field_bytes_limit > 0:
+            remaining = truncate_field_value(remaining, field_bytes_limit)
+        rows.append(("ERR", "+remaining", remaining, ""))
+
+    # Calculate column widths
+    if not rows:
+        return ""
+
+    col_widths = [
+        max(len(row[0]) for row in rows),  # status
+        max(len(row[1]) for row in rows),  # path
+        max(len(row[2]) for row in rows),  # hex
+    ]
+
+    # Format rows with space padding
+    # Only include decoded column if decode=True
+    lines = []
+    for status, path, hex_val, decoded in rows:
+        if decode:
+            line = f"{status:<{col_widths[0]}}  {path:<{col_widths[1]}}  {hex_val:<{col_widths[2]}}  {decoded}"
+        else:
+            line = f"{status:<{col_widths[0]}}  {path:<{col_widths[1]}}  {hex_val}"
+        lines.append(line.rstrip())
+
+    return "\n".join(lines)
+
+
 def get_message_explanation_string(validation_result, validation_log_dict = None, fmt="oneline", filter_fields = None, decode = False, no_newlines=False):
-    
+
     _, validation_result_dict, validation_diff_dict, __, ___ = validation_result
-    
+
     if fmt == "oneline":
         result_string = get_message_explanation_string_oneline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
     elif fmt == "compact":
@@ -220,11 +857,11 @@ def get_message_explanation_string(validation_result, validation_log_dict = None
     if validation_log_dict is not None and len(validation_log_dict) > 0:
         for field_name, log_message_list in validation_log_dict.items():
             logs_string += f"- {field_name}:\n"
-                        
+
             #print([f"    - {log_message}" for log_message in log message_list])
             logs_string += "\n".join([f"    - {log_message}" for log_message in log_message_list])
             logs_string += "\n"
-    
+
     return logs_string + result_string
 
 def find_message_rules(message_name, cocodoc):
@@ -254,8 +891,7 @@ def split_fields_for_create_message(message_name, message_rules_tokenized):
     return needed_input_fields, length_fields, fixed_fields
 
 def create_message(message_name, cocodoc, input_dict = None):
-
-    message_rules = find_message_rules(message_name, cocodoc.all_messages_rules_tokenized)
+    message_rules = find_message_rules(message_name, cocodoc)
     message_rules = tokenize_rules(message_rules) if isinstance(message_rules, str) else message_rules
     message_rules = perform_subtypeof_overrides(message_rules, cocodoc.all_messages_rules_tokenized)
     
@@ -406,6 +1042,109 @@ def create_message(message_name, cocodoc, input_dict = None):
 
     return message
 
+# max_chunk_size: max number of bytes for each chunk
+# message_format: can be 'hex' or 'bytes'
+def split_message(message, max_chunk_size, message_format):
+    result = []
+
+    message_str_len = len(message)
+    chunk_str_offset = 0
+    max_chunk_str_len = 2 * max_chunk_size if message_format == "hex" else max_chunk_size
+    if max_chunk_str_len > message_str_len:
+        max_chunk_str_len = message_str_len
+
+    while True:
+        if chunk_str_offset + max_chunk_str_len < message_str_len:
+            result.append(message[chunk_str_offset : chunk_str_offset + max_chunk_str_len])
+            chunk_str_offset += max_chunk_str_len
+        else:
+            if len(message[chunk_str_offset:]) > 0:
+                result.append(message[chunk_str_offset:])
+            break
+    
+    return result
+
+def message_recipe_find_field_index(message_recipe, field_name):
+    for i, field in enumerate(message_recipe["message_fields"]):
+        if field["field_name"] == field_name:
+            return i
+
+def transport(cocodoc, message_recipe):
+
+    message_name = message_recipe["message_name"]
+    payload_field = message_recipe["transport"]["payload_field"]
+    sequence_field = message_recipe["transport"].get("sequence_field")
+    payload_mtu = message_recipe["transport"].get("mtu")
+    rolling_state = message_recipe["transport"].get("rolling_state")
+
+
+    payload_idx = message_recipe_find_field_index(message_recipe, payload_field)
+    if payload_idx is None:
+        print(f"Can't find payload field '{payload_field}' in recipe.message_fields:")
+        pprint(message_recipe["message_fields"])
+        return []
+    sequence_idx = None if sequence_field is None else message_recipe_find_field_index(message_recipe, payload_field)
+
+    payloads = None
+
+    if "value_is_hex_string" not in message_recipe["message_fields"][payload_idx]:
+        message_recipe["message_fields"][payload_idx]["value_is_hex_string"] = not message_recipe["message_fields"][payload_idx]["value_is_file_path"]
+    
+    value_format = "hex" if message_recipe["message_fields"][payload_idx]["value_is_hex_string"] else "bytes"
+
+    if message_recipe["message_fields"][payload_idx]["value_is_file_path"] == True:
+        if message_recipe["message_fields"][payload_idx]["value_is_hex_string"] == False:
+            if message_recipe["message_fields"][payload_idx]["value"] == "-":
+                payloads = [sys.stdin.buffer.read()]
+            else:
+                with open(message_recipe["message_fields"][payload_idx]["value"], mode="rb") as f:
+                    payloads = [f.read()]
+        else:
+            if message_recipe["message_fields"][payload_idx]["value"] == "-":
+                payloads = sys.stdin.read().split()
+            else:
+                with open(message_recipe["message_fields"][payload_idx]["value"]) as f:
+                    payloads = [f.read()]
+        
+        message_recipe["message_fields"][payload_idx]["value_is_file_path"] = False
+    else:
+        payloads = [message_recipe["message_fields"][payload_idx]["value"]]
+
+    chunks = []
+    if payload_mtu is not None:
+        for payload in payloads:
+            payload_chunks = split_message(payload, payload_mtu, value_format)
+            
+            state = {
+
+            }
+            if rolling_state is not None:
+                for k, v in rolling_state.items():
+                    if isinstance(v, str):
+                        arg = v.split()
+                        if arg[0] == "sequence":
+                            state[k] = [i for i in range(int(arg[1]), len(payload_chunks), int(arg[2]))]
+
+            # for chunk in payload_chunks:
+            #     if 
+
+
+            chunks += payload_chunks
+
+    else:
+        chunks += payloads
+
+    result = []
+    # sequence_number = 0
+    for chunk in chunks:
+        message_recipe["message_fields"][payload_idx]["value"] = chunk
+        # if sequence_field is not None:
+        #     message_recipe["message_fields"][sequence_idx] = field_encode()... sequence_number
+        #     sequence_number += 1
+        result.append(create_message(message_name, cocodoc, message_recipe))
+    
+    return result
+
 def get_input_schema(message_name, cocodoc):    
     message_rules = find_message_rules(message_name, cocodoc)
     message_rules = tokenize_rules(message_rules) if isinstance(message_rules, str) else message_rules
@@ -429,6 +1168,7 @@ def get_input_schema(message_name, cocodoc):
     
     return schema
 
+
 """
 
         DEFAULT ENTRYPOINT
@@ -436,70 +1176,184 @@ def get_input_schema(message_name, cocodoc):
 """
 def cli_main():
     args = docopt(__doc__, version=f"protococo {__version__}")
-    #print(args)
 
-    #with open("default.coco") as f:
-        #all_messages_string = f.read()
-
-    with open(args["--cocofile"]) as f:
-        all_messages_string = f.read()
-    
     ret = 0
-        
-    cocodoc = CocoDocument(all_messages_string)
-    
+
+    # Parse the .coco file using new v1.0 parser
+    try:
+        coco_file = parse(args["--cocofile"])
+    except ParseError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"Error: File not found: {args['--cocofile']}", file=sys.stderr)
+        sys.exit(1)
+
+    decoder = Decoder(coco_file)
+
+    # Get max message name length for formatting
+    max_name_len = max(len(m.name) for m in coco_file.messages) if coco_file.messages else 0
+
+    # Parse field bytes limit (default 32, 0=unlimited)
+    field_bytes_limit = int(args["--field-bytes-limit"]) if args["--field-bytes-limit"] else 32
+
     if args["tree"] == True:
-        cocodoc.print_tree()
+        # Build and print inheritance tree
+        from treelib import Tree
+        tree = Tree()
+        tree.create_node("messages", "root")
+
+        # Add all messages, tracking parents
+        for msg in coco_file.messages:
+            parent_id = msg.parent if msg.parent else "root"
+            if not tree.contains(parent_id) and parent_id != "root":
+                # Parent not yet added, add as child of root
+                tree.create_node(parent_id, parent_id, parent="root")
+            tree.create_node(msg.name, msg.name, parent=parent_id)
+
+        tree.show()
+
     elif args["mspec"] == True:
-        message_specs = cocodoc.get_message_specs_by_short_name(args["<message_name>"])
-        l = len(message_specs)
-        if l > 1:
-            print(f"{l} coincidences found:\n")
-        print("\n".join([str(ms) for ms in message_specs]))
+        # Print message specification
+        from coco_ast import (
+            IntegerType, BytesType, StringType, PadType, BitFieldType, EnumTypeRef,
+            LiteralSize, FieldRefSize, VariableSize
+        )
+
+        def format_type(field_type):
+            if isinstance(field_type, IntegerType):
+                base = field_type.base
+                if field_type.endian:
+                    return f"{base}:{field_type.endian.value}"
+                return base
+            elif isinstance(field_type, BytesType):
+                return "bytes"
+            elif isinstance(field_type, StringType):
+                return "string:cstr" if field_type.is_cstr else "string"
+            elif isinstance(field_type, PadType):
+                return "pad"
+            elif isinstance(field_type, BitFieldType):
+                return "bits[8]"
+            elif isinstance(field_type, EnumTypeRef):
+                return field_type.enum_name
+            return str(field_type)
+
+        msg = coco_file.get_message(args["<message_name>"])
+        if msg is None:
+            print(f"Message '{args['<message_name>']}' not found")
+            ret = 1
+        else:
+            fields = decoder.resolve_message(msg)
+            print(f"message {msg.name}" + (f" extends {msg.parent}" if msg.parent else "") + " {")
+            for field in fields:
+                type_str = format_type(field.type)
+                size_str = ""
+                if field.size:
+                    if isinstance(field.size, LiteralSize):
+                        size_str = f"[{field.size.value}]"
+                    elif isinstance(field.size, FieldRefSize):
+                        size_str = f"[{field.size.field_name}]"
+                    elif isinstance(field.size, VariableSize):
+                        size_str = "[]"
+                default_str = ""
+                if field.default_value is not None:
+                    if isinstance(field.default_value, int):
+                        default_str = f" = 0x{field.default_value:02X}"
+                    else:
+                        default_str = f" = {field.default_value}"
+                print(f"  {type_str} {field.name}{size_str}{default_str}")
+            print("}")
+
+    elif args["wireshark"] == True:
+        # Generate Wireshark Lua dissector
+        from wireshark_gen import generate_lua_dissector
+
+        message_name = args["<message_name>"]
+        try:
+            lua_code = generate_lua_dissector(coco_file, message_name)
+            print(lua_code)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            ret = 1
 
     elif args["check"] == True:
         messages_input = [sys.stdin.read()] if not args["<message_hex_string>"] else args["<message_hex_string>"]
-        
+
         for message_hex_string in messages_input:
-            validate_result = validate_message_by_name(args["<message_name>"], message_hex_string, cocodoc)
-            
-            explanation_logs = None
-            if args["--verbose"] == True:
-                explanation_logs = validate_result[3]
-                
-            print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
-            
-            if validate_result[0] == False:
+            result = decoder.validate_by_name(args["<message_name>"], message_hex_string)
+
+            if args["--format"] == "porcelain":
+                # Porcelain format: machine-readable, space-padded columns
+                msg = coco_file.get_message(args["<message_name>"])
+                fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
+            elif args["--tree"] or args["--format"] == "tree":
+                # Build field metadata for display formatters (including nested)
+                msg = coco_file.get_message(args["<message_name>"])
+                fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit))
+            else:
+                validate_result = validation_result_to_tuple(result)
+
+                explanation_logs = None
+                if args["--verbose"] == True:
+                    explanation_logs = validate_result[3]
+
+                print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
+
+            if not result.is_valid:
                 ret = 1
-        
+
     elif args["find"] == True:
         messages_input = sys.stdin.read().split() if not args["<message_hex_string>"] else args["<message_hex_string>"]
         for message_hex_string in messages_input:
-            ordered_message_names, validate_results_by_message_name = identify_message(message_hex_string, cocodoc)
-            for i, match in enumerate(ordered_message_names):
-                color = AnsiColors.BOLD + AnsiColors.OKGREEN if validate_results_by_message_name[match][0] == True else AnsiColors.BOLD + AnsiColors.FAIL
-                
-                filter_fields = [i.strip() for i in args["--dissect-fields"].split(",")] if args["--dissect-fields"] is not None else None
-                                
+            results = decoder.identify_message(message_hex_string)
+
+            for i, result in enumerate(results):
+                validate_tuple = validation_result_to_tuple(result)
+                color = AnsiColors.BOLD + AnsiColors.OKGREEN if result.is_valid else AnsiColors.BOLD + AnsiColors.FAIL
+
+                filter_fields = [f.strip() for f in args["--dissect-fields"].split(",")] if args["--dissect-fields"] is not None else None
+
+                # Porcelain format: machine-readable, space-padded columns
+                if args["--format"] == "porcelain":
+                    if args["--dissect"] == True or filter_fields is not None:
+                        msg = coco_file.get_message(result.message_name)
+                        fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                        print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
+                    else:
+                        # Just message name, no field dissection
+                        status = "OK" if result.is_valid else "ERR"
+                        print(f"{status}  {result.message_name}")
+                    if not result.is_valid:
+                        ret = 1
+                    if args["--list"] == False:
+                        break
+                    continue
+
                 explanation = ""
                 if args["--dissect"] == True or filter_fields is not None:
-                    validate_result = validate_message_by_name(match, message_hex_string, cocodoc)
-                    
-                    if args["--verbose"] == True:
-                        explanation = "\n" + get_message_explanation_string(validate_result, validate_result[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
+                    if args["--tree"] or args["--format"] == "tree":
+                        # Build field metadata for display formatters (including nested)
+                        msg = coco_file.get_message(result.message_name)
+                        fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                        explanation = "\n" + get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit)
+                    elif args["--verbose"] == True:
+                        explanation = "\n" + get_message_explanation_string(validate_tuple, validate_tuple[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
                     else:
-                        explanation = get_message_explanation_string(validate_result, None, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
-                        
-                    if validate_result[0] == False:
+                        explanation = get_message_explanation_string(validate_tuple, None, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
+
+                    if not result.is_valid:
                         ret = 1
-                
-                name_string = match
-                if args["--long-names"] == False:
-                    name_string = get_short_message_name(match)
-                number_of_whitespaces = get_max_message_name_length(cocodoc.all_messages_rules_tokenized, args["--long-names"]) - len(name_string) + 2
-                    
+
+                name_string = result.message_name
+                number_of_whitespaces = max_name_len - len(name_string) + 2
+
                 if args["--list"] == False:
-                    if args["--format"] == "oneline" or args["--format"] == "compact":
+                    if args["--tree"] or args["--format"] == "tree":
+                        print(color + f"[{name_string}]" + AnsiColors.ENDC)
+                        print(explanation)
+                    elif args["--format"] == "oneline" or args["--format"] == "compact":
                         print(color  + f"[{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
                     else:
                         print(color  + f"[{name_string}]" + AnsiColors.ENDC)
@@ -507,47 +1361,126 @@ def cli_main():
                         print()
                     break
                 else:
-                    if args["--format"] == "oneline" or args["--format"] == "compact":
+                    if args["--tree"] or args["--format"] == "tree":
+                        print(color + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
+                        print(explanation)
+                        print()
+                    elif args["--format"] == "oneline" or args["--format"] == "compact":
                         print(color  + f"{str(i): >8}: [{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
                     else:
                         print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
                         print(explanation)
                         print()
     elif args["create"] == True:
-        
+        encoder = Encoder(coco_file)
+
         if args["<message_name>"] is not None and args["<message_name>"] != []:
-            try:
-                message = create_message(args["<message_name>"], cocodoc.all_messages_rules_tokenized)
-                print(message)
-            except ValueError as e:
-                print(e)
+            message_name = args["<message_name>"]
+            msg = coco_file.get_message(message_name)
+            if msg is None:
+                print(f"Error: Message '{message_name}' not found")
+                ret = 1
+            else:
+                # Interactive mode - prompt for input fields
+                category = encoder.categorize_fields(msg)
+                specs = encoder.get_input_specs(msg)
+
+                if not specs:
+                    # No input needed, just create
+                    try:
+                        result = encoder.create_message(msg, {})
+                        print(result)
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        ret = 1
+                else:
+                    # Prompt for each input field
+                    input_values = {}
+                    for spec in specs:
+                        prompt = f"Enter value for '{spec.name}' ({spec.field_type}): "
+                        value = input(prompt)
+
+                        # Parse value based on type
+                        if spec.field_type in ("u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"):
+                            if value.startswith("0x"):
+                                input_values[spec.name] = int(value, 16)
+                            else:
+                                input_values[spec.name] = int(value)
+                        else:
+                            input_values[spec.name] = value
+
+                    try:
+                        result = encoder.create_message(msg, input_values)
+                        print(result)
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        ret = 1
+
         elif args["--from-json"] is not None:
             json_file_path = args["--from-json"]
-            
-            with open(json_file_path) as f:
-                full_recipe = json.load(f)
-            
-            for message_recipe in full_recipe:
-                try:
-                    message = create_message(message_recipe["message_name"], cocodoc.all_messages_rules_tokenized, input_dict=message_recipe)
-                    print(message)
-                except ValueError as e:
-                    print(e)
-            
-            
-            
-        #else:
-            
+
+            try:
+                with open(json_file_path) as f:
+                    full_recipe = json.load(f)
+
+                # Handle both single recipe and list of recipes
+                if isinstance(full_recipe, dict):
+                    full_recipe = [full_recipe]
+
+                for message_recipe in full_recipe:
+                    message_name = message_recipe["message_name"]
+                    msg = coco_file.get_message(message_name)
+                    if msg is None:
+                        print(f"Error: Message '{message_name}' not found")
+                        ret = 1
+                        continue
+
+                    # Build input values from recipe
+                    input_values = {}
+                    for field_recipe in message_recipe.get("message_fields", []):
+                        field_name = field_recipe["field_name"]
+                        value = field_recipe["value"]
+
+                        # Handle file path
+                        if field_recipe.get("value_is_file_path", False):
+                            if field_recipe.get("value_is_hex_string", True):
+                                with open(value) as f:
+                                    value = f.read().strip()
+                            else:
+                                with open(value, "rb") as f:
+                                    value = f.read().hex()
+
+                        input_values[field_name] = value
+
+                    try:
+                        result = encoder.create_message(msg, input_values)
+                        print(result)
+                    except Exception as e:
+                        print(f"Error creating {message_name}: {e}")
+                        ret = 1
+
+            except FileNotFoundError:
+                print(f"Error: JSON file not found: {json_file_path}")
+                ret = 1
+            except json.JSONDecodeError as e:
+                print(f"Error: Invalid JSON: {e}")
+                ret = 1
+
     elif args["json-recipe"] == True:
+        encoder = Encoder(coco_file)
         message_names = args["<message_names>"]
-        
-        schema = []
-        
+
+        recipes = []
         for message_name in message_names:
-            schema += get_input_schema(message_name, cocodoc.all_messages_rules_tokenized)
-        
-        print(json.dumps(schema, indent = 2))
-        #print(yaml.dump(schema))
+            msg = coco_file.get_message(message_name)
+            if msg is None:
+                print(f"Error: Message '{message_name}' not found", file=sys.stderr)
+                ret = 1
+                continue
+            recipes.append(encoder.get_json_recipe(msg))
+
+        if recipes:
+            print(json.dumps(recipes, indent=2))
                 
         
         

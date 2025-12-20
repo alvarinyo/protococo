@@ -1,686 +1,700 @@
-import os
-import re
-import copy
-from collections import OrderedDict
-from pprint import pprint
+"""
+Protococo Parser v1.0
 
-from treelib import Node, Tree
+Uses Lark to parse .coco files and transform them into AST nodes.
+"""
 
-TOKEN_DELIMITER = '$'
-COMMENT_DELIMITER = '#'
+from pathlib import Path
+from lark import Lark, Transformer, v_args, Token
+from coco_ast import (
+    CocoFile, Constant, EnumDef, EnumMember, Message, Field,
+    IntegerType, BytesType, StringType, PadType, BitFieldType,
+    EnumTypeRef, MessageTypeRef,
+    LiteralSize, FieldRefSize, VariableSize, SizeExpr,
+    EnumValue, FieldAttributes, DisplayFormat,
+    MatchClause, MatchBranch,
+    ValueOverride, StructureOverride,
+    Endianness,
+    BitField, BitFieldBody,
+)
 
-def remove_comments(line):
-    if line.count(COMMENT_DELIMITER) == 0:
-        return line
-    
-    result = line.strip()
-    
-    if line.count(TOKEN_DELIMITER) == 0:
-        result = line[:line.index(COMMENT_DELIMITER)]
-    else:
-        lhs = line[:line.index(TOKEN_DELIMITER)].strip()
-        if COMMENT_DELIMITER in lhs:
-            open_parenthesis_count = 0
-            for i, c in enumerate(lhs):
-                if c=="(":
-                    open_parenthesis_count+=1
-                elif c==")":
-                    open_parenthesis_count-=1
-                if open_parenthesis_count < 0:
-                    raise RuntimeError("Unexpected ')'")
-                if c == COMMENT_DELIMITER and open_parenthesis_count == 0:
-                    result = line[:i]
+
+# Load grammar from file
+GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
+
+
+def get_parser() -> Lark:
+    """Create and return the Lark parser."""
+    with open(GRAMMAR_PATH) as f:
+        grammar = f.read()
+    return Lark(grammar, start="start", parser="lalr")
+
+
+class CocoTransformer(Transformer):
+    """Transform Lark parse tree into AST nodes."""
+
+    # === Terminals ===
+
+    def IDENT(self, token):
+        return str(token)
+
+    def HEX_NUMBER(self, token):
+        return int(str(token), 16)
+
+    def DEC_NUMBER(self, token):
+        return int(str(token))
+
+    def BIN_NUMBER(self, token):
+        return int(str(token), 2)
+
+    def STRING(self, token):
+        # Remove quotes
+        return str(token)[1:-1]
+
+    def VERSION_NUMBER(self, token):
+        return str(token)
+
+    def ENDIAN(self, token):
+        return Endianness.LITTLE if str(token) == "le" else Endianness.BIG
+
+    # === Header ===
+
+    def version_decl(self, items):
+        return ("version", items[0])
+
+    def endian_decl(self, items):
+        return ("endian", items[0])
+
+    def header_section(self, items):
+        result = {}
+        for key, value in items:
+            result[key] = value
+        return result
+
+    # === Constants ===
+
+    def const_value(self, items):
+        return items[0]
+
+    def const_def(self, items):
+        name, value = items
+        return Constant(name=name, value=value)
+
+    # === Enums ===
+
+    def enum_member(self, items):
+        name, value = items
+        return EnumMember(name=name, value=value)
+
+    def enum_members(self, items):
+        return list(items)
+
+    def base_type(self, items):
+        # items[0] is already a string from INT_TYPE
+        return items[0]
+
+    def enum_def(self, items):
+        name, base_type, members = items
+        return EnumDef(name=name, base_type=base_type, members=members)
+
+    # === Field Types ===
+
+    def INT_TYPE(self, token):
+        return str(token)
+
+    def integer_type(self, items):
+        return items[0]  # Already a string from INT_TYPE
+
+    def endian_suffix(self, items):
+        return items[0]
+
+    def string_encoding(self, items):
+        return "cstr"
+
+    def bitfield_type(self, items):
+        # items[0] is the INT token with the bit count
+        bit_count = int(items[0])
+        if bit_count % 8 != 0:
+            raise ValueError(f"bits[{bit_count}]: bit count must be a multiple of 8")
+        return BitFieldType(bit_count=bit_count)
+
+    def BYTES_KW(self, token):
+        return "bytes"
+
+    def STRING_KW(self, token):
+        return "string"
+
+    def PAD_KW(self, token):
+        return "pad"
+
+    def builtin_type(self, items):
+        """Handle builtin types: integer_type, bytes, string, pad, bits
+
+        Returns tuple of (FieldType, SizeSpec or None)
+        """
+        if len(items) == 0:
+            return (None, None)
+
+        first = items[0]
+
+        # Integer type with optional endianness
+        if isinstance(first, str) and first in ("u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"):
+            endian = items[1] if len(items) > 1 and isinstance(items[1], Endianness) else None
+            return (IntegerType(base=first, endian=endian), None)
+
+        # BitFieldType
+        if isinstance(first, BitFieldType):
+            return (first, None)
+
+        # bytes with optional size
+        if first == "bytes":
+            size = None
+            for item in items[1:]:
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                    size = item
+            return (BytesType(), size)
+
+        # string with optional encoding and size
+        if first == "string":
+            is_cstr = False
+            size = None
+            for item in items[1:]:
+                if item == "cstr":
+                    is_cstr = True
+                elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                    size = item
+            return (StringType(is_cstr=is_cstr), size)
+
+        # pad with size
+        if first == "pad":
+            size = None
+            for item in items[1:]:
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                    size = item
+            return (PadType(), size)
+
+        return (first, None)
+
+    def message_item(self, items):
+        return items[0]
+
+    def typed_field_def(self, items):
+        """Handle field with type reference: TypeName field_name ..."""
+        type_name = items[0]  # IDENT for type
+        field_name = items[1]  # IDENT for field
+
+        size = None
+        default = None
+        match = None
+        attrs = None
+
+        for item in items[2:]:
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                size = item
+            elif isinstance(item, MatchClause):
+                match = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
+
+        return Field(
+            name=field_name,
+            type=EnumTypeRef(enum_name=type_name),
+            size=size,
+            default_value=default,
+            match_clause=match,
+            attributes=attrs,
+        )
+
+    def field_type(self, items):
+        if len(items) == 0:
+            return None
+
+        first = items[0]
+
+        # Check if it's an integer type string
+        if isinstance(first, str) and first in ("u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"):
+            endian = items[1] if len(items) > 1 and isinstance(items[1], Endianness) else None
+            return IntegerType(base=first, endian=endian)
+
+        # Check for Token objects (bytes/string/pad)
+        if isinstance(first, Token):
+            token_str = str(first)
+            if token_str == "bytes":
+                return BytesType()
+            if token_str == "string":
+                is_cstr = len(items) > 1 and items[1] == "cstr"
+                return StringType(is_cstr=is_cstr)
+            if token_str == "pad":
+                return PadType()
+
+        # BitFieldType
+        if isinstance(first, BitFieldType):
+            return first
+
+        # Otherwise it's an identifier (enum or message reference)
+        if isinstance(first, str):
+            return EnumTypeRef(enum_name=first)
+
+        return first
+
+    # === Size Spec ===
+
+    def field_ref(self, items):
+        """Handle field reference: IDENT or IDENT.IDENT.IDENT..."""
+        return [str(item) for item in items]
+
+    def size_value(self, items):
+        if len(items) == 0:
+            return VariableSize()
+        val = items[0]
+        # If it's already a SizeSpec (from expression), return it
+        if isinstance(val, (LiteralSize, FieldRefSize, SizeExpr)):
+            return val
+        if isinstance(val, int):
+            return LiteralSize(value=val)
+        # field_ref returns a list of path segments
+        if isinstance(val, list):
+            return FieldRefSize(field_path=val)
+        return FieldRefSize(field_path=[str(val)])
+
+    def size_spec(self, items):
+        if len(items) == 0:
+            return None
+        return items[0]
+
+    # Size expression handlers
+    def size_add(self, items):
+        left, right = self._to_size_spec(items[0]), self._to_size_spec(items[1])
+        return SizeExpr(op='+', left=left, right=right)
+
+    def size_sub(self, items):
+        left, right = self._to_size_spec(items[0]), self._to_size_spec(items[1])
+        return SizeExpr(op='-', left=left, right=right)
+
+    def size_mul(self, items):
+        left, right = self._to_size_spec(items[0]), self._to_size_spec(items[1])
+        return SizeExpr(op='*', left=left, right=right)
+
+    def _to_size_spec(self, val):
+        """Convert a value to a SizeSpec."""
+        if isinstance(val, (LiteralSize, FieldRefSize, SizeExpr)):
+            return val
+        if isinstance(val, int):
+            return LiteralSize(value=val)
+        # field_ref returns a list of path segments
+        if isinstance(val, list):
+            return FieldRefSize(field_path=val)
+        return FieldRefSize(field_path=[str(val)])
+
+    # === Values ===
+
+    def enum_value(self, items):
+        enum_name, member_name = items
+        return EnumValue(enum_name=enum_name, member_name=member_name)
+
+    def value_expr(self, items):
+        return items[0]
+
+    def default_value(self, items):
+        return items[0]
+
+    # === Attributes ===
+
+    def display_format(self, items):
+        # items[0] is already a string from IDENT
+        return DisplayFormat(name=str(items[0]))
+
+    def attribute(self, items):
+        if len(items) == 1:
+            # doc attribute
+            if isinstance(items[0], str):
+                return ("doc", items[0])
+            # display attribute
+            return ("display", items[0])
+        return items
+
+    def attributes(self, items):
+        attrs = FieldAttributes()
+        for item in items:
+            if isinstance(item, tuple):
+                key, val = item
+                if key == "display":
+                    attrs.display = val
+                elif key == "doc":
+                    attrs.doc = val
+        return attrs
+
+    # === Match ===
+
+    def match_pattern(self, items):
+        if len(items) == 0:
+            return None  # default case
+        val = items[0]
+        if isinstance(val, Token) and str(val) == "_":
+            return None
+        return val
+
+    def match_branch(self, items):
+        pattern = items[0]
+        fields = items[1] if len(items) > 1 else []
+        return MatchBranch(pattern=pattern, fields=fields)
+
+    def match_branches(self, items):
+        return list(items)
+
+    def match_clause(self, items):
+        # discriminator is a field_ref (list of path segments)
+        discriminator = items[0]
+        if isinstance(discriminator, list):
+            discriminator = ".".join(discriminator)
+        branches = items[1]
+        return MatchClause(discriminator=discriminator, branches=branches)
+
+    # === Fields ===
+
+    def int_field(self, items):
+        """Handle integer field: u8/u16/... field_name ..."""
+        int_type = items[0]  # from integer_type
+        idx = 1
+        endian = None
+        if idx < len(items) and isinstance(items[idx], Endianness):
+            endian = items[idx]
+            idx += 1
+
+        name = items[idx]
+        idx += 1
+
+        default = None
+        match = None
+        attrs = None
+        for item in items[idx:]:
+            if isinstance(item, MatchClause):
+                match = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
+
+        return Field(
+            name=name,
+            type=IntegerType(base=int_type, endian=endian),
+            size=None,
+            default_value=default,
+            match_clause=match,
+            attributes=attrs,
+        )
+
+    def bytes_field(self, items):
+        """Handle bytes field: bytes field_name[size] ..."""
+        # items[0] is "bytes" keyword (already processed)
+        name = items[1]
+        idx = 2
+
+        size = None
+        default = None
+        match = None
+        attrs = None
+
+        for item in items[idx:]:
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                size = item
+            elif isinstance(item, MatchClause):
+                match = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
+
+        return Field(
+            name=name,
+            type=BytesType(),
+            size=size,
+            default_value=default,
+            match_clause=match,
+            attributes=attrs,
+        )
+
+    def string_field(self, items):
+        """Handle string field: string[:cstr] field_name[size] ..."""
+        # items[0] is "string" keyword
+        idx = 1
+        is_cstr = False
+        if idx < len(items) and items[idx] == "cstr":
+            is_cstr = True
+            idx += 1
+
+        name = items[idx]
+        idx += 1
+
+        size = None
+        default = None
+        match = None
+        attrs = None
+
+        for item in items[idx:]:
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                size = item
+            elif isinstance(item, MatchClause):
+                match = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
+
+        return Field(
+            name=name,
+            type=StringType(is_cstr=is_cstr),
+            size=size,
+            default_value=default,
+            match_clause=match,
+            attributes=attrs,
+        )
+
+    def pad_field(self, items):
+        """Handle pad field: pad[size] = value"""
+        # items[0] is "pad" keyword
+        idx = 1
+
+        size = None
+        default = None
+        attrs = None
+
+        for item in items[idx:]:
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                size = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
+
+        return Field(
+            name="_pad",  # Anonymous padding
+            type=PadType(),
+            size=size,
+            default_value=default,
+            attributes=attrs,
+        )
+
+    def BIT_KW(self, token):
+        return "bit"
+
+    def BITS_KW(self, token):
+        return "bits"
+
+    def bitfield_member(self, items):
+        """Handle bit field member: bit name or bits[N] name"""
+        if items[0] == "bit":
+            # Single bit: bit name
+            return BitField(name=items[1], bit_count=1)
         else:
-            result = line[:line.index(COMMENT_DELIMITER)]
-    
-    return result.strip()
+            # Multiple bits: bits[N] name
+            # items = ["bits", N, name]
+            return BitField(name=items[2], bit_count=items[1])
 
-def tokenize_line(line):
-    tokenized_rule = []
-        
-    if line.count(TOKEN_DELIMITER) == 0:
-        if (rule_is_title([line])):
-            tokenized_rule += [line]
-        else:
-            raise RuntimeError(f"Non-title rule without '{TOKEN_DELIMITER}' character")
-    else:
-    
-        #left hand side
-        lhs = line[:line.index(TOKEN_DELIMITER)].strip()
-        tokenized_rule.append(lhs)
-        #right hand side
-        rhs = line[line.strip().index(TOKEN_DELIMITER)+1:]
-        tokenized_rhs = [token.strip() for token in rhs.split(',')]
-        tokenized_rule += tokenized_rhs
-    
-    return tokenized_rule
+    def bitfield_body(self, items):
+        """Handle bitfield body: { bit_members... }"""
+        return BitFieldBody(fields=list(items))
 
-def tokenize_rules(rules_string):
-    lines = [line.strip() for line in rules_string.splitlines() if len(line.strip()) > 0]
+    def bitfield(self, items):
+        """Handle bitfield: bits[N] field_name { ... }"""
+        # items[0] is BitFieldType (with bit_count from parsing)
+        bitfield_type = items[0]
+        name = items[1]
+        idx = 2
 
-    tokenized_rules = []
-    for line in lines:
-        line = remove_comments(line)
-        if line == "":
-            continue
-        rule = tokenize_line(line)
-        tokenized_rules.append(rule)
-    
-    return tokenized_rules
+        body = None
+        attrs = None
 
-def rule_is_special(tokenized_rule):
-    return tokenized_rule[0] == ""
+        for item in items[idx:]:
+            if isinstance(item, BitFieldBody):
+                body = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
 
-def rule_is_field(tokenized_rule):
-    #print(f"-----> {tokenized_rule}")
-    return not rule_is_special(tokenized_rule) and len(tokenized_rule) > 1
+        return Field(
+            name=name,
+            type=bitfield_type,
+            bitfield_body=body,
+            attributes=attrs,
+        )
 
-def rule_is_override(tokenized_rule):
-    return rule_is_special(tokenized_rule) and tokenized_rule[1][:9] == "override "
+    def typed_field(self, items):
+        """Handle field with type reference: TypeName field_name ..."""
+        type_name = items[0]  # IDENT for type
+        field_name = items[1]  # IDENT for field
 
-def rule_is_subtypeof(tokenized_rule):
-    return rule_is_special(tokenized_rule) and tokenized_rule[1][:10] == "subtypeof "
+        size = None
+        default = None
+        match = None
+        attrs = None
 
-def rule_is_title(tokenized_rule):
-    title_with_brackets = tokenized_rule[0]
-    #print(f"{len(title_with_brackets)=}, {tokenized_rule[0]=}, {tokenized_rule[-1]=}")
-    if len(tokenized_rule) != 1 or title_with_brackets[0] != '[' or title_with_brackets[-1] != ']':
-        return False
-    elif tokenized_rule.count(TOKEN_DELIMITER) > 0 or tokenized_rule.count(',') > 0:
-        raise RuntimeError("Unexpected character in title rule={tokenized_rule}")
-    else:
-        return True
+        for item in items[2:]:
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                size = item
+            elif isinstance(item, MatchClause):
+                match = item
+            elif isinstance(item, FieldAttributes):
+                attrs = item
+            elif item is not None:
+                default = item
 
-def field_rule_is_encoded(rule):
-    assert rule_is_field(rule)
-    
-    for param in rule[1:]:
-        if "encodedas" in param:
-            return True
-    
-    return False
+        return Field(
+            name=field_name,
+            type=EnumTypeRef(enum_name=type_name),
+            size=size,
+            default_value=default,
+            match_clause=match,
+            attributes=attrs,
+        )
 
-def field_rule_is_lengthof(rule):
-    assert rule_is_field(rule)
-    
-    for param in rule[1:]:
-        if "lengthof " in param:
-            return True
-    
-    return False
+    # === Overrides ===
 
-def lengthof_rule_get_target_field_name(rule):
-    assert field_rule_is_lengthof(rule)
-    
-    for param in rule[1:]:
-        if "lengthof " in param:
-            return param[param.find("lengthof ") + len("lengthof "):].strip()
-    
-    raise RuntimeError("lengthof not found in lengthof rule")
+    def field_path(self, items):
+        return list(items)
 
-def field_rule_get_field_name(tokenized_field_rule):
-    return tokenized_field_rule[1]
-
-def field_rule_get_byte_symbol(tokenized_field_rule):
-    return tokenized_field_rule[0]
-
-def byte_symbol_is_XX_rule_type(byte_symbol):
-    return len(byte_symbol)%2 == 0 and set(byte_symbol) == {"X"}
-
-def field_rule_complies_parent(tokenized_child_field_rule, tokenized_parent_field_rule):
-    assert(rule_is_field(tokenized_child_field_rule))
-    assert(rule_is_field(tokenized_parent_field_rule))
-    #print(f"Checking if {tokenized_child_field_rule=} complies with {tokenized_parent_field_rule=}")
-    parent_byte_symbol = tokenized_parent_field_rule[0]
-    parent_field_name = tokenized_parent_field_rule[1]
-    parent_params = tokenized_parent_field_rule[2:]
-    
-    child_byte_symbol = tokenized_child_field_rule[0]
-    child_field_name = tokenized_child_field_rule[1]
-    child_params = tokenized_child_field_rule[2:]
-    
-    if byte_symbol_is_valid_hex(parent_byte_symbol):
-        if "..." in child_byte_symbol:
-            s_before_ellipsis, s_after_ellipsis = child_byte_symbol.split("...")
-            #print(f"{s_before_ellipsis=}, {s_after_ellipsis=}")
-            
-            for i, c in enumerate(s_before_ellipsis):
-                if c.lower() == parent_byte_symbol[i].lower():
-                    pass
-                else:
-                    return False
-            
-            for i, c in enumerate(reversed(s_after_ellipsis)):
-                print (i,c,parent_byte_symbol[-i-1])
-                if c.lower() == parent_byte_symbol[-i-1].lower():
-                    pass
-                else:
-                    return False
-            
-            return True
-        else:
-            return child_byte_symbol.lower() == parent_byte_symbol.lower()
-    elif byte_symbol_is_XX_rule_type(parent_byte_symbol):
-        field_length = len(parent_byte_symbol)//2
-        
-        return len(parent_byte_symbol) == len(child_byte_symbol) or "..." in child_byte_symbol and len(parent_byte_symbol) > len(child_byte_symbol.replace(".", ""))
-    elif parent_byte_symbol == "N":
-        if "-" in child_byte_symbol:
-            return False
-        else:
-            return True
-    else:
-        raise RuntimeError(f"Unexpected parent rule {tokenized_parent_field_rule=}")
-
-def title_rule_get_name(title_rule):
-    assert(rule_is_title(title_rule))
-    return title_rule[0][1:-1]
-
-def subtypeof_rule_get_parent(subtypeof_rule):
-    assert(rule_is_subtypeof)
-    return subtypeof_rule[1][10:]
-
-def override_rules(parent_rules, child_rules):
-    tokenized_parent_rules = tokenize_rules(parent_rules) if isinstance(parent_rules, str) else parent_rules
-    tokenized_child_rules = tokenize_rules(child_rules) if isinstance(child_rules, str) else child_rules
-    
-    parent_name = tokenized_parent_rules[0][0][1:-1] #TODO should this be before the 2 next statements to avoid too long parent name? include subtype name in parent_name or not?
-    
-    tokenized_overriden_rules = [i for i in tokenized_parent_rules]
-    #tokenized_overriden_rules[0][0] = tokenized_parent_rules[0][0][:-1] + ":" + tokenized_child_rules[0][0][1:] # The expanded message name should be the_parent_one:the_child_one
-    
-    override_dict = {}
-    
-    i=0
-    while i < len(tokenized_child_rules):
-        child_rule = tokenized_child_rules[i]
-        if rule_is_override(child_rule):
-            overriden_field_name = child_rule[1][9:].strip()
-        
-            start_multifield_rule = ["", f"startmultifield {parent_name}.{overriden_field_name}"]
-            end_multifield_rule = ["", f"endmultifield {parent_name}.{overriden_field_name}"]
-
-            override_dict[overriden_field_name] = [start_multifield_rule]
-        
-            j = 1
-            ijrule = tokenized_child_rules[i+j]
-            while i+j < len(tokenized_child_rules) and not rule_is_override(ijrule):
-                override_dict[overriden_field_name].append(ijrule)
-                j+=1
-                if i+j < len(tokenized_child_rules):
-                    ijrule = tokenized_child_rules[i+j]
-            
-            override_dict[overriden_field_name].append(end_multifield_rule)
-                
-        i+=1
-    #print("OVERRIDE DICT:")
-    #pprint(override_dict)
-    
-    for overriden_field_name, subfields in override_dict.items():
-        found_override = False
-        for i, parent_rule in enumerate(tokenized_overriden_rules):
-            #print(f"{parent_rule=}")
-            if rule_is_field(parent_rule) and overriden_field_name == field_rule_get_field_name(parent_rule):
-                tokenized_overriden_rules = tokenized_overriden_rules[:i] + subfields + tokenized_overriden_rules[i+1:]
-                found_override = True
-                break
-        if not found_override:
-            raise RuntimeError(f"Overriding spec '{title_rule_get_name(child_rules[0])}', couldn't find overriden field '{overriden_field_name}' in parent spec '{parent_name}'")
-    
-    #pprint(tokenized_overriden_rules)
-    
-    return tokenized_overriden_rules
-
-def perform_subtypeof_overrides(child_tokenized_rules, all_messages_rules_tokenized):
-    expanded_child_rules = child_tokenized_rules
-    i = 0
-    while i < len(expanded_child_rules):
-        rule = expanded_child_rules[i]
-        if rule_is_subtypeof(rule):
-            #pprint(f"{rule=} is subtypeof rule")
-            parent_rules = None
-            for message_rules_tokenized in all_messages_rules_tokenized:
-                if title_rule_get_name(message_rules_tokenized[0]) == subtypeof_rule_get_parent(rule):
-                    parent_rules = message_rules_tokenized
-                    break
-            if parent_rules == None:
-                raise RuntimeError(f"Couldn't find parent of subtype for {rule=}")
+    def override_def(self, items):
+        path = items[0]
+        if len(items) == 2:
+            second = items[1]
+            if isinstance(second, list):
+                # Structure override
+                return StructureOverride(path=path, fields=second)
             else:
-                #pprint(f"found parent {parent_rules[0]=} of subtype for {rule=}")
-                
-                #pprint(f"before override:")
-                #pprint(expanded_child_rules)
-                # pprint(f"{expanded_child_rules[i]=}")
-                expanded_child_rules = override_rules(parent_rules, expanded_child_rules)
-                #pprint(f"after override")
-                #pprint(expanded_child_rules)
-                #pprint(f"{expanded_child_rules[i]=}")
-
-            i = 0
-        i = i+1
-    return expanded_child_rules
-
-def preprocess_encode_fields(all_messages_rules_tokenized):
-    for message_rules in all_messages_rules_tokenized:
-        for rule in message_rules:
-            if rule_is_field(rule):
-                byte_symbol = rule[0].strip()
-                if byte_symbol[0] == "(" and byte_symbol[-1] == ")":
-                    #Override field rule byte symbol with the encoded value (hex string)
-                    rule[0] = field_encode(rule, byte_symbol[1:-1])
-
-def preprocess_multiple_subtypeof(all_messages_rules_tokenized):
-    j = 0
-    while j < len(all_messages_rules_tokenized):
-        message_rules = all_messages_rules_tokenized[j]
-        for i, rule in enumerate(message_rules):
-            if rule_is_subtypeof(rule):
-                subtypeof_rule_args_string = subtypeof_rule_get_parent(rule)
-                parents = subtypeof_rule_args_string.split()
-                if len(parents) > 1:
-                    assert rule_is_title(message_rules[0])
-
-                    new_message_mangled_names = []
-                    #then calculate rest of variations (for rest of parents) and append to the cocodocument:
-                    for parent in parents:
-                        new_message_spec = copy.deepcopy(message_rules)
-                        new_message_spec[i] = ["", f"subtypeof {parent}"] #replace subtypeof rule with a subtypeof rule - with each parent
-                        assert rule_is_title(new_message_spec[0])
-                        new_message_spec[0][0] = f"[{parent}.{new_message_spec[0][0][1:]}" #replace title of spec with mangled name #TODO can I delete this line?
-                        new_message_mangled_names.append(title_rule_get_name(new_message_spec[0]))
-
-                        all_messages_rules_tokenized = all_messages_rules_tokenized[:j] + [new_message_spec] + all_messages_rules_tokenized[j:]
-                        j+=1
-                    
-                    del all_messages_rules_tokenized[j]
-                    j-=1
-                        
-                    #now, make variations for all children
-                    for k, mr in enumerate(all_messages_rules_tokenized):
-                        for m, r in enumerate(mr):
-                            if rule_is_subtypeof(r):
-                                r_parents = subtypeof_rule_get_parent(r).split()
-                                common_parent = title_rule_get_name(message_rules[0])
-                                if common_parent in r_parents:
-                                    r_parents.remove(common_parent)
-                                    r = ["", f"subtypeof {' '.join(r_parents + new_message_mangled_names)}"]
-                                    all_messages_rules_tokenized[k][m] = r
-        j+=1
-    
-    return all_messages_rules_tokenized
-
-def full_field_names_refer_to_same(a, b):
-    return re.sub(":[^\.]*", "", a) == re.sub(":[^\.]*", "", b)
-
-def rule_is_multifieldstart(rule):
-    return len(rule) == 2 and rule[1][:15] == "startmultifield"
-
-def rule_is_multifieldend(rule):
-    return len(rule) == 2 and rule[1][:13] == "endmultifield"
-
-def get_multifieldstart_full_name(multifieldstart_param):
-    return multifieldstart_param[16:].strip()
-
-def get_multifieldend_full_name(multifieldend_param):
-    return multifieldend_param[14:].strip()
-
-def _get_subtype_parents(subtypename, all_messages_rules_tokenized, parents_list, limit = None):
-    found_parent = False
-    parent_name = None
-    
-    for message_rules in all_messages_rules_tokenized:
-        assert(rule_is_title(message_rules[0]))
-        if title_rule_get_name(message_rules[0]) == subtypename:
-            for rule in message_rules[1:]:
-                if rule_is_subtypeof(rule):
-                    parent_name = subtypeof_rule_get_parent(rule)
-                    found_parent = True
-                    if limit is not None:
-                        limit -= 1
-                    break
-                
-        if found_parent:
-            break
-    
-    if found_parent:
-        parents_list.append(parent_name)
-        if limit is None or limit > 0:
-            _get_subtype_parents(parent_name, all_messages_rules_tokenized, parents_list)
-
-def get_subtype_parents(subtypename, all_messages_rules_tokenized, include_subtypename, limit = None):
-    parents = []
-    if include_subtypename == True:
-        parents.append(subtypename)
-    _get_subtype_parents(subtypename, all_messages_rules_tokenized, parents, limit)
-    return parents
-
-def byte_symbol_is_valid_hex(byte_symbol):
-    try:
-        int(byte_symbol, 16)
-    except ValueError:
-        return False
-    return True
-
-def is_valid_message_input(message):
-    try:
-        int(message.replace("...", ""), 16)
-    except ValueError:
-        return False
-    return (isinstance(message, str) and len(message)%2 == 0 == message.count("...") == 0) or (len(message)%2 == 1 and message.count("...") == 1)
-
-def get_length_from_length_param(param, message):
-    
-    rule = param["rule"]
-    
-    rule_params = rule[1:]
-    
-    
-    is_little_endian = False
-    for rule_param in rule_params:
-        if rule_param.split() == ["encodedas", "littleendian"]:
-            is_little_endian = True
-            break
-    
-    is_big_endian = False
-    for rule_param in rule_params:
-        if rule_param.split() == ["encodedas", "bigendian"]:
-            is_big_endian = True
-            break
-    
-    assert not (is_little_endian and is_big_endian)
-    
-    #TODO: refactor using field_decode
-    if is_little_endian:
-        length_value_message_offset = param["value_offset"]
-        length_value_length = param["value_length"]
-        
-        if len(message) < length_value_message_offset+length_value_length*2:
-            raise LookupError(f"Can't look up length for param {param['param']} because the message is not long enough and doesn't contain that length field")
-        
-        length_value_string_input = message[length_value_message_offset:length_value_message_offset+length_value_length*2]
-        
-        length_value_string_swapped = "".join(re.findall('..',length_value_string_input)[::-1])
-        current_length = int(length_value_string_swapped, 16)
-        return current_length
-    
-    elif is_big_endian:
-        length_value_message_offset = param["value_offset"]
-        length_value_length = param["value_length"]
-        
-        if len(message) < length_value_message_offset+length_value_length*2:
-            raise LookupError(f"Can't look up length for param {param['param']} because the message is not long enough and doesn't contain that length field")
-        
-        length_value_string_input = message[length_value_message_offset:length_value_message_offset+length_value_length*2]
-        
-        current_length = int(length_value_string_input, 16)
-        return current_length
-        
-
-    elif "lengthof " in param["param"]:
-        length_value_message_offset = param["value_offset"]
-        length_value_length = param["value_length"]
-        
-        if length_value_length != 1:
-            raise RuntimeError(f"Error in rules: '{param['param']}' field of more than 1 byte doesn't specify its endianness")
-        
-        if len(message) < length_value_message_offset+length_value_length*2:
-            raise LookupError(f"Can't look up length for param {param['param']} because the message is not long enough and doesn't contain that length field")
-        
-        length_value = message[length_value_message_offset:length_value_message_offset+length_value_length*2]
-        #print ("length_value_message_offset:", length_value_message_offset)
-        #print ("length_value_length:", length_value_length)
-        #print ("length_value:", length_value)
-        current_length = int(length_value, 16)
-        return current_length
-    else:
-        raise RuntimeError(f"Unexpected {length_param=}")
-
-def get_field_name_from_length_param(param):
-    pstring = param["param"]
-    pstring = pstring.replace("littleendian:lengthof", "")
-    pstring = pstring.replace("le:lengthof", "")
-    pstring = pstring.replace("bigendian:lengthof", "")
-    pstring = pstring.replace("be:lengthof", "")
-    pstring = pstring.replace("lengthof", "").strip()
-    return pstring
-
-def get_full_field_name_from_length_param(param):
-    return param["parent_message_name"] + "." + get_field_name_from_length_param(param)
-
-def field_decode(field_rule, hex_string):
-    assert(rule_is_field(field_rule))
-    
-    result = hex_string
-    
-    for param in field_rule[1:][::-1]:
-        param_tokens = param.split()
-        if param_tokens[0] == "encodedas":
-            if param_tokens[1] == "ascii":
-                try:
-                    result = bytes.fromhex(result).decode()
-                except UnicodeDecodeError:
-                    return "--(can't decode)--"
-            elif param_tokens[1] == "bigendian":
-                result = int(result, 16)
-            elif param_tokens[1] == "littleendian":
-                #SWAP BYTES:
-                result = "".join(re.findall('..',result)[::-1])
-                result = int(result, 16)
-            else:
-                RuntimeError(f"Unknown encoding {param_tokens[1]} in rule {field_rule}")
-    
-    return result
-
-def field_encode(field_rule, unencoded):
-    assert(rule_is_field(field_rule))
-    
-    result = unencoded
-    
-    def to_hex_string(x):
-        x = int(x)
-        short_hex_string = hex(x)[2:]
-        additional_zeros = len(field_rule[0]) - len(short_hex_string)
-        return ("0"*additional_zeros + short_hex_string).lower()
-    
-    for param in field_rule[1:]:
-        param_tokens = param.split()
-        if param_tokens[0] == "encodedas":
-            if param_tokens[1] == "ascii":
-                try:
-                    result = result.encode().hex()
-                except UnicodeDecodeError:
-                    return "--(can't decode)--"
-            elif param_tokens[1] == "bigendian":
-                result = to_hex_string(result)
-            elif param_tokens[1] == "littleendian":
-                result = to_hex_string(result)
-                result = "".join(re.findall('..',result)[::-1])
-            else:
-                RuntimeError(f"Unknown encoding {param_tokens[1]} in rule {field_rule}")
-    
-    return result
-
-#def calculate_multifield_minimum_lengths(message_rules):
-    
-
-    
-    #for rule in message_rules:
-        #if rule_is_field(rule):
-
-def field_get_expected_bytes_length(field_rule, previous_length_params_list, active_multifields, message, current_offset, rule_index, message_rules_tokenized):
-    
-    assert rule_is_field(field_rule)
-    
-    byte_symbol = field_rule[0]
-    field_name = field_rule[1]
-    params = field_rule[2:]
-    
-    if byte_symbol_is_valid_hex(byte_symbol):
-        current_length = len(byte_symbol) //2
-        return current_length
-    elif byte_symbol_is_XX_rule_type(byte_symbol):
-        field_length = len(byte_symbol)//2      
-        current_length = field_length
-        return current_length
-    elif byte_symbol == "N":
-        
-        foundLength = False
-        
-        byte_symbol = field_rule[0]
-        
-        for param in previous_length_params_list:
-            #length_param_full_field_name =  get_full_field_name_from_length_param(param)
-            #print(f"{length_param_full_field_name=}")
-            
-            #print(f"Checking in not-multifields, {field_name=}, {get_field_name_from_length_param(param)=}")
-            
-            if field_name == get_field_name_from_length_param(param) and unmatched_multifieldstart_params_to_stack(active_multifields) == param["multifields_stack"]:
-                foundLength = True
-                return get_length_from_length_param(param, message)
-        
-        ## Length with target=this N field not found
-        ## Is this part of a multifield that has a specified length?
-        
-        for param in previous_length_params_list:
-            length_param_full_field_name =  get_full_field_name_from_length_param(param)
-            
-            multifields = active_multifields
-            for multifield in multifields:
-                #print(f"{multifield=}")
-                multifield_full_name = get_multifieldstart_full_name(multifield["param"])
-                multifield_offset = multifield["offset"]
-                #print(f"{multifield_full_name=}")
-                #print(f"Checking if are same {get_full_field_name_from_length_param(param)} and {multifield_full_name}: {full_field_names_refer_to_same(length_param_full_field_name, multifield_full_name)}")
-                if full_field_names_refer_to_same(length_param_full_field_name, multifield_full_name):
-                    #print(f"found multifield {multifield_full_name} for field rule {field_rule}")
-                    foundLength = True
-                    max_current_length = get_length_from_length_param(param, message) - (current_offset - multifield_offset)//2 # this is the length until the end of the multifield
-                    
-                    ## Search in rest of multifield rules to get the rest of the length
-                    length_of_rest_of_multifield = 0
-                    for i, post_Nfield_rule in enumerate(message_rules_tokenized[rule_index+1:]):
-                        if rule_is_multifieldend(post_Nfield_rule) and get_multifieldend_full_name(post_Nfield_rule[1]) == multifield_full_name:
-                            break
-                        elif rule_is_field(post_Nfield_rule):
-                            if post_Nfield_rule[0] == "N":
-                                raise RuntimeError(f"Found N field in rule {post_Nfield_rule} after another multifield-inferable N field in rule {field_rule}. Can't deduce length")
-                            else:
-                                length_of_rest_of_multifield += field_get_expected_bytes_length(post_Nfield_rule, previous_length_params_list, active_multifields, message, current_offset, rule_index+1+i, message_rules_tokenized)
-                        
-                    #print(length_of_rest_of_multifield)
-                    
-                    current_length = max_current_length - length_of_rest_of_multifield
-                    #print(f"{get_length_from_length_param(param, message)=}")
-                    #print(f"{multifield_offset=},{current_offset=},{current_length=}")
-                    
-                    #if current_length <= 0:
-                        #raise RuntimeError(f"Unexpected {current_length=} <= 0 in N field inside multifield for {field_rule=}")
-                    
-                    return current_length
-                
-    if not foundLength:
-        raise RuntimeError(f"Length of N field not found in previous fields for rule: {field_rule}")
-
-def unmatched_multifieldstart_params_to_stack(unmatched_multifieldstart_params):
-    return [get_multifieldstart_full_name(i["param"]) for i in unmatched_multifieldstart_params]
-
-def get_conflicting_field_names(tokenized_message_rules):
-    conflicting_names = []
-    names = []
-    for rule in tokenized_message_rules:
-        if rule_is_field(rule):
-            field_name = rule[1]
-            if field_name in names:
-                if not field_name in conflicting_names:
-                    conflicting_names.append(field_name)
-            else:
-                names.append(field_name)
-
-    return conflicting_names
-
-def split_multimessage_rules(multimessage_rules_string):
-    lines = [clean_line for line in multimessage_rules_string.splitlines() if (clean_line := remove_comments(line)) != '']
-    multimessage_rules_string_without_empty_lines = os.linesep.join(lines)
-    list_of_message_rules = re.split("(\[[^\[]*)", multimessage_rules_string_without_empty_lines)
-    list_of_message_rules = list(filter(lambda x: x!= "", list_of_message_rules))
-    
-    return list_of_message_rules
-
-def get_short_message_name(long_message_name):
-    return re.sub(r'.*?([^\.]*)$', r'\1', long_message_name)
-
-def get_max_message_name_length(all_messages_rules_tokenized, long_names = False):
-    max_length = 0
-    if long_names:
-        for message_rules in all_messages_rules_tokenized:
-            max_length = max(max_length, len(title_rule_get_name(message_rules[0])))
-    else:
-        for message_rules in all_messages_rules_tokenized:
-            max_length = max(max_length, len(get_short_message_name(title_rule_get_name(message_rules[0]))))
-    return max_length
-
-class CocoMessageSpec(object):
-    def __init__(self, full_message_name, preprocessed_rules):
-        self.full_message_name = full_message_name
-        self.short_message_name = full_message_name[self.full_message_name.rfind('.')+1:]
-        self.preprocessed_rules = preprocessed_rules
-        self.conflicting_field_names = get_conflicting_field_names(self.preprocessed_rules)
-
-        # print(self)
-
-    def __str__(self):
-        t = Tree()
-        t.create_node(self.short_message_name, self.full_message_name)
-        parent = t.root
-        for r in self.preprocessed_rules[1:]:
-            if rule_is_multifieldstart(r):
-                id = get_multifieldstart_full_name(r[1])
-                label = f'({id})'
-                parent = t.create_node(label, id, parent = parent).identifier
-            elif rule_is_multifieldend(r):
-                parent = t.parent(parent).identifier
-            else:
-                t.create_node(" ".join(r), " ".join(r), parent = parent)
-
-        return t.show(stdout = False)
-
-class CocoDocument(object):
-    def __init__(self, all_messages_string):
-        self.all_messages_rules_tokenized = [tokenize_rules(r) for r in split_multimessage_rules(all_messages_string)]
-        preprocess_encode_fields(self.all_messages_rules_tokenized)
-        self.all_messages_rules_tokenized = preprocess_multiple_subtypeof(self.all_messages_rules_tokenized)
-
-        self.message_specs = []
-        for message_rules in self.all_messages_rules_tokenized:
-            self.message_specs.append(CocoMessageSpec(title_rule_get_name(message_rules[0]), perform_subtypeof_overrides(message_rules, self.all_messages_rules_tokenized)))
-            p = get_subtype_parents(self.message_specs[-1].full_message_name, self.all_messages_rules_tokenized, False, limit = 1)
-
-        self.tree = Tree()
-        self.tree.create_node("_", 0)
-        for message_spec in self.message_specs:
-            parent = get_subtype_parents(message_spec.full_message_name, 
-                                         self.all_messages_rules_tokenized, 
-                                         False, 
-                                         limit = 1)
-            parent = 0 if parent == [] else parent[0]
-            self.tree.create_node(message_spec.short_message_name,
-                                  message_spec.full_message_name,
-                                  parent = parent)
-
-
-    def get_message_spec(self, full_message_name):
-        for ms in self.message_specs:
-            if ms.full_message_name == full_message_name:
-                return ms
+                # Value override
+                return ValueOverride(path=path, value=second)
         return None
 
-    def get_message_specs_by_short_name(self, message_name):
-        ret = []
-        for ms in self.message_specs:
-            if ms.short_message_name == message_name:
-                ret.append(ms)
-        return ret
+    # === Message ===
 
-    def print_tree(self):
-        print(self.tree.show(stdout = False))
+    def extends_clause(self, items):
+        return items[0]
 
+    def message_body(self, items):
+        return list(items)
+
+    def message_def(self, items):
+        name = items[0]
+        parent = None
+        body = []
+
+        for item in items[1:]:
+            if isinstance(item, str):
+                parent = item
+            elif isinstance(item, list):
+                body = item
+
+        fields = [f for f in body if isinstance(f, Field)]
+        overrides = [o for o in body if isinstance(o, (ValueOverride, StructureOverride))]
+
+        return Message(
+            name=name,
+            parent=parent,
+            fields=fields,
+            overrides=overrides,
+        )
+
+    # === Definitions ===
+
+    def definition(self, items):
+        return items[0]
+
+    def definitions(self, items):
+        return list(items)
+
+    # === Start ===
+
+    def start(self, items):
+        header = items[0]
+        definitions = items[1] if len(items) > 1 else []
+
+        constants = [d for d in definitions if isinstance(d, Constant)]
+        enums = [d for d in definitions if isinstance(d, EnumDef)]
+        messages = [d for d in definitions if isinstance(d, Message)]
+
+        return CocoFile(
+            version=header.get("version", "1.0"),
+            endian=header.get("endian", Endianness.LITTLE),
+            constants=constants,
+            enums=enums,
+            messages=messages,
+        )
+
+
+# Global parser instance
+_parser = None
+
+
+class ParseError(Exception):
+    """Exception raised for parsing errors with line/column info."""
+    def __init__(self, message: str, line: int = None, column: int = None, file_path: str = None):
+        self.line = line
+        self.column = column
+        self.file_path = file_path
+        super().__init__(message)
+
+    def __str__(self):
+        location = ""
+        if self.file_path:
+            location = f"{self.file_path}:"
+        if self.line is not None:
+            location += f"{self.line}:"
+            if self.column is not None:
+                location += f"{self.column}:"
+        if location:
+            return f"{location} {self.args[0]}"
+        return self.args[0]
+
+
+def parse(file_path: str | Path) -> CocoFile:
+    """Parse a .coco file and return the AST."""
+    from lark.exceptions import UnexpectedToken, UnexpectedCharacters, UnexpectedInput
+
+    global _parser
+    if _parser is None:
+        _parser = get_parser()
+
+    with open(file_path) as f:
+        content = f.read()
+
+    try:
+        tree = _parser.parse(content)
+    except UnexpectedToken as e:
+        msg = f"Unexpected token '{e.token}'"
+        if e.expected:
+            expected = ", ".join(sorted(e.expected)[:5])
+            msg += f". Expected one of: {expected}"
+        raise ParseError(msg, line=e.line, column=e.column, file_path=str(file_path)) from None
+    except UnexpectedCharacters as e:
+        msg = f"Unexpected character '{content[e.pos_in_stream] if e.pos_in_stream < len(content) else 'EOF'}'"
+        if e.allowed:
+            allowed = ", ".join(sorted(e.allowed)[:5])
+            msg += f". Expected one of: {allowed}"
+        raise ParseError(msg, line=e.line, column=e.column, file_path=str(file_path)) from None
+    except UnexpectedInput as e:
+        raise ParseError(str(e), file_path=str(file_path)) from None
+
+    transformer = CocoTransformer()
+    return transformer.transform(tree)
+
+
+def parse_string(content: str) -> CocoFile:
+    """Parse a .coco string and return the AST."""
+    global _parser
+    if _parser is None:
+        _parser = get_parser()
+
+    tree = _parser.parse(content)
+    transformer = CocoTransformer()
+    return transformer.transform(tree)
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python parser.py <file.coco>")
+        sys.exit(1)
+
+    result = parse(sys.argv[1])
+    print(result)

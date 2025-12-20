@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Find with --dissect shows field breakdown
+
+COMMAND="python3 protococo.py find aa010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco --dissect --format=compact"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/find/fixtures/mime_message_dissect.expected"

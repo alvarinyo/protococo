@@ -1,0 +1,35 @@
+version 1.0
+endian be
+
+// UDP Header (RFC 768)
+// All fields are big-endian (network byte order)
+
+message udp_header {
+  u16 src_port           // Source port
+  u16 dst_port           // Destination port
+  u16 length             // Length of UDP header + data (min 8)
+  u16 checksum           // Checksum (0 = not computed)
+}
+
+// UDP with payload - uses length expression
+message udp_packet {
+  u16 src_port           // Source port
+  u16 dst_port           // Destination port
+  u16 length             // Total length (header=8 + payload)
+  u16 checksum           // Checksum
+  bytes payload[length - 8]  // Payload size = length - 8 byte header
+}
+
+// DNS query over UDP (port 53)
+message udp_dns extends udp_packet {
+  dst_port = 53          // DNS port
+  payload {
+    u16 transaction_id   // Random ID
+    u16 flags            // Query/response flags
+    u16 questions        // Number of questions
+    u16 answers          // Number of answers
+    u16 authority        // Authority RRs
+    u16 additional       // Additional RRs
+    bytes query_data[]   // Query content
+  }
+}

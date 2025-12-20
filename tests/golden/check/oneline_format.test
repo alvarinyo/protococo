@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Check message with oneline format output
+
+COMMAND="python3 protococo.py check simple_message aa010548656c6c6f1234bb --cocofile=tests/fixtures/foo.coco --format=oneline"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/oneline_format.expected"

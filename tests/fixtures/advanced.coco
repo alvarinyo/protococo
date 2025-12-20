@@ -1,0 +1,96 @@
+version 1.0
+endian le
+
+// Test advanced features: match, bit fields, structure overrides, padding
+
+const STX = 0x02
+const ETX = 0x03
+
+enum MsgType : u8 {
+  TEXT = 0x01,
+  BINARY = 0x02,
+  CONTROL = 0x03
+}
+
+// === Bit Fields ===
+message status_byte {
+  bits[8] flags {
+    bit enabled
+    bit ready
+    bits[2] mode
+    bits[4] reserved
+  }
+}
+
+// === Padding ===
+message aligned_packet {
+  u8 type
+  pad[3]
+  u32 data
+  pad[2] = 0xFF
+  u16 checksum
+}
+
+// === Pattern Matching ===
+message polymorphic_message {
+  u8 stx = STX
+  MsgType msg_type
+  u8 payload_length
+
+  bytes payload[payload_length] match msg_type {
+    MsgType.TEXT -> { string text[] }
+    MsgType.BINARY -> { bytes raw_data[] }
+    _ -> { bytes unknown[] }
+  }
+
+  u8 etx = ETX
+}
+
+// === Base for Structure Override ===
+message wrapper {
+  u8 stx = STX
+  u8 body_length
+  bytes body[body_length]
+  u8 etx = ETX
+}
+
+// === Structure Override ===
+message detailed_wrapper extends wrapper {
+  body {
+    u8 version
+    u8 flags
+    u8 data_length
+    bytes data[data_length]
+  }
+}
+
+// === Nested Structure Override ===
+message nested_wrapper extends detailed_wrapper {
+  body.data {
+    u16 id
+    string name[]
+  }
+}
+
+// === Combined: Match with Enum Values ===
+message command_response {
+  u8 stx = STX
+  u8 cmd_type
+  u8 response_length
+
+  bytes response[response_length] match cmd_type {
+    0x01 -> {
+      u8 status
+      string message[]
+    }
+    0x02 -> {
+      u16 error_code
+      u32 timestamp
+    }
+    _ -> {
+      bytes raw[]
+    }
+  }
+
+  u8 etx = ETX
+}

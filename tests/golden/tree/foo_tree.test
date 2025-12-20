@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Display message hierarchy tree
+
+COMMAND="python3 protococo.py tree --cocofile=tests/fixtures/foo.coco"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/tree/fixtures/foo_tree.expected"
