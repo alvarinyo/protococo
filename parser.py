@@ -336,6 +336,17 @@ class CocoTransformer(Transformer):
             return None
         return val
 
+    def match_body(self, items):
+        """Handle match body: either braced message_body or single field_def."""
+        if len(items) == 0:
+            return []
+        body = items[0]
+        # If it's a single Field (shorthand), wrap in list
+        if isinstance(body, Field):
+            return [body]
+        # Otherwise it's already a list from message_body
+        return body if body else []
+
     def match_branch(self, items):
         pattern = items[0]
         fields = items[1] if len(items) > 1 else []

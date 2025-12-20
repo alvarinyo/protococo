@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: Match shorthand syntax (single field without inner braces)
+
+COMMAND="python3 protococo.py check shorthand_match_message 01060548656c6c6f --cocofile=tests/fixtures/match_shorthand.coco --format=compact"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/match_shorthand.expected"

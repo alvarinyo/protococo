@@ -106,7 +106,10 @@ match_clause: "match" field_ref "{" match_branches "}"
 
 match_branches: match_branch+
 
-match_branch: match_pattern "->" "{" message_body "}"
+match_branch: match_pattern "->" match_body
+
+match_body: "{" message_body "}"     // full form: { field1; field2 }
+          | field_def                // shorthand: single field without braces
 
 match_pattern: HEX_NUMBER
              | DEC_NUMBER

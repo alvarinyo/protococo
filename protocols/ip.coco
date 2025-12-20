@@ -200,15 +200,9 @@ message ipv4_header {
 message ipv4_packet {
   ipv4_header header
   bytes payload[header.total_length - 20] match header.protocol {
-    Protocol.TCP -> {
-      tcp_segment tcp
-    }
-    Protocol.UDP -> {
-      udp_datagram udp
-    }
-    Protocol.ICMP -> {
-      icmp_message icmp
-    }
+    Protocol.TCP -> tcp_segment tcp
+    Protocol.UDP -> udp_datagram udp
+    Protocol.ICMP -> icmp_message icmp
     _ -> {}
   }
 }
@@ -235,15 +229,9 @@ message ipv6_header {
 message ipv6_packet {
   ipv6_header header
   bytes payload[header.payload_length] match header.next_header {
-    Protocol.TCP -> {
-      tcp_segment tcp
-    }
-    Protocol.UDP -> {
-      udp_datagram udp
-    }
-    Protocol.ICMPV6 -> {
-      icmp_message icmpv6
-    }
+    Protocol.TCP -> tcp_segment tcp
+    Protocol.UDP -> udp_datagram udp
+    Protocol.ICMPV6 -> icmp_message icmpv6
     _ -> {}
   }
 }
@@ -273,27 +261,15 @@ message vlan_tag {
 message ethernet_frame {
   ethernet_header eth
   bytes payload[] match eth.ethertype {
-    EtherType.IPV4 -> {
-      ipv4_packet ip
-    }
-    EtherType.IPV6 -> {
-      ipv6_packet ip6
-    }
-    EtherType.ARP -> {
-      arp_packet arp
-    }
+    EtherType.IPV4 -> ipv4_packet ip
+    EtherType.IPV6 -> ipv6_packet ip6
+    EtherType.ARP -> arp_packet arp
     EtherType.VLAN -> {
       vlan_tag vlan
       bytes inner[] match vlan.inner_ethertype {
-        EtherType.IPV4 -> {
-          ipv4_packet ip
-        }
-        EtherType.IPV6 -> {
-          ipv6_packet ip6
-        }
-        EtherType.ARP -> {
-          arp_packet arp
-        }
+        EtherType.IPV4 -> ipv4_packet ip
+        EtherType.IPV6 -> ipv6_packet ip6
+        EtherType.ARP -> arp_packet arp
         _ -> {}
       }
     }

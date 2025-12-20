@@ -1,0 +1,31 @@
+version 1.0
+endian le
+
+// Test match shorthand syntax (single field without inner braces)
+
+enum MsgType : u8 {
+  TEXT = 0x01,
+  BINARY = 0x02,
+  CONTROL = 0x03
+}
+
+message text_payload {
+  u8 text_length
+  string text[text_length]
+}
+
+message binary_payload {
+  u32 data_size
+  bytes data[data_size]
+}
+
+message shorthand_match_message {
+  u8 msg_type
+  u8 payload_length
+  // Shorthand: single field without braces
+  bytes payload[payload_length] match msg_type {
+    MsgType.TEXT -> text_payload content
+    MsgType.BINARY -> binary_payload content
+    _ -> { bytes raw[] }
+  }
+}
