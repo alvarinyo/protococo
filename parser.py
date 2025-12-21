@@ -586,11 +586,18 @@ class CocoTransformer(Transformer):
         return list(items)
 
     def message_def(self, items):
-        name = items[0]
+        # Check for optional 'layer' modifier
+        is_layer = False
+        idx = 0
+        if isinstance(items[0], Token) and str(items[0]) == "layer":
+            is_layer = True
+            idx = 1
+
+        name = items[idx]
         parent = None
         body = []
 
-        for item in items[1:]:
+        for item in items[idx + 1:]:
             if isinstance(item, str):
                 parent = item
             elif isinstance(item, list):
@@ -604,6 +611,7 @@ class CocoTransformer(Transformer):
             parent=parent,
             fields=fields,
             overrides=overrides,
+            is_layer=is_layer,
         )
 
     # === Definitions ===

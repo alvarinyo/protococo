@@ -49,10 +49,13 @@ class ValidationResult:
     fields: list[DecodeResult]
     remaining_bytes: str = ""
     errors: list[str] = None
+    protocol_chain: list[str] = None  # Chain of layer field names (e.g., ["eth", "ip", "tcp"])
 
     def __post_init__(self):
         if self.errors is None:
             self.errors = []
+        if self.protocol_chain is None:
+            self.protocol_chain = []
 
     @property
     def total_matched_bytes(self) -> int:
@@ -163,6 +166,19 @@ class Decoder:
     def __init__(self, coco_file: CocoFile):
         self.coco_file = coco_file
         self.default_endian = coco_file.endian
+        self._protocol_chain = []  # Tracks layer field names during decoding
+
+    def _is_layer_message(self, msg_name: str) -> bool:
+        """Check if message or any of its bases is marked as layer."""
+        msg = self.coco_file.get_message(msg_name)
+        while msg:
+            if msg.is_layer:
+                return True
+            if msg.parent:
+                msg = self.coco_file.get_message(msg.parent)
+            else:
+                break
+        return False
 
     def get_constant_value(self, name: str) -> int | str | None:
         """Look up a constant by name."""
@@ -387,6 +403,9 @@ class Decoder:
                 hex_value = hex_value[:consumed_bytes * 2]
             elif msg_def and field.size is None:
                 # Single embedded message
+                # Track layer in protocol chain
+                if self._is_layer_message(msg_def.name):
+                    self._protocol_chain.append(field.name)
                 if field.structure_body:
                     # Use overridden structure instead of message definition
                     decoded_value, structure_valid = self._decode_structure(
@@ -703,7 +722,8 @@ class Decoder:
             actual_val = value.val if isinstance(value, FieldValue) else value
             if isinstance(actual_val, dict):
                 self._flatten_to_context(full_key, actual_val, context)
-            elif isinstance(actual_val, (int, float)):
+            elif isinstance(actual_val, (int, float, str)):
+                # Store int, float, and string values (including enum decoded values)
                 context[full_key] = actual_val
 
     def _encode_integer(self, value: int, int_type: IntegerType) -> str:
@@ -862,13 +882,16 @@ class Decoder:
             # Store both hex and decoded value for display flexibility
             result[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
 
-            # Store decoded value in local context for subsequent field size refs
+            # Store decoded value in local context for subsequent field refs (match, size)
             if isinstance(decode_result.decoded_value, (int, float)):
                 local_context[field.name] = decode_result.decoded_value
             elif isinstance(decode_result.decoded_value, dict):
                 # Bitfield or embedded message - store dict and flatten for dotted path refs
                 local_context[field.name] = decode_result.decoded_value
                 self._flatten_to_context(field.name, decode_result.decoded_value, local_context)
+            elif isinstance(decode_result.decoded_value, str):
+                # String values including enum decoded values (e.g., "EtherType.IPV4")
+                local_context[field.name] = decode_result.decoded_value
             elif isinstance(field.type, IntegerType) and decode_result.hex_value:
                 try:
                     local_context[field.name] = int(decode_result.hex_value, 16)
@@ -930,6 +953,9 @@ class Decoder:
             best_result = None
             best_hex_len = 0
 
+            # Save chain before trying candidates (validate_message resets it)
+            saved_chain = list(self._protocol_chain)
+
             for candidate in candidate_types:
                 candidate_result = self.validate_message(candidate, remaining)
 
@@ -961,6 +987,9 @@ class Decoder:
                     best_result = fallback_result
                     best_hex_len = fallback_hex_len
 
+            # Restore chain after trying candidates
+            self._protocol_chain = saved_chain
+
             if best_result is None or best_hex_len == 0:
                 # No candidate could parse, stop
                 break
@@ -989,6 +1018,9 @@ class Decoder:
         """
         hex_str = hex_str.lower().replace(" ", "")
         fields = self.resolve_message(msg)
+
+        # Reset protocol chain for this validation
+        self._protocol_chain = []
 
         results = []
         context = {}
@@ -1048,6 +1080,7 @@ class Decoder:
             message_name=msg.name,
             fields=results,
             remaining_bytes=remaining_bytes,
+            protocol_chain=list(self._protocol_chain),  # Copy the chain
         )
 
     def validate_by_name(self, message_name: str, hex_str: str) -> ValidationResult:

@@ -4,12 +4,12 @@
 Usage:
   protococo check  <message_name> [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
-                      [--verbose --decode --decode-no-newlines --tree]
+                      [--verbose --decode --decode-no-newlines --tree --layer-colors]
                       [--field-bytes-limit=<n>]
   protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
-                      [--list --verbose --decode --decode-no-newlines --long-names --tree]
+                      [--list --verbose --decode --decode-no-newlines --long-names --tree --layer-colors]
                       [--field-bytes-limit=<n>]
   protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
@@ -35,6 +35,7 @@ Options:
   --long-names              Prints the full mangled message names if a name mangling preprocess has been made during cocofile parsing
   --list                    Include a list of the most fitting messages in find results.
   --tree                    Display dissected fields as a tree structure.
+  --layer-colors            Color tree background by protocol layer depth (requires --tree).
   --field-bytes-limit=<n>   Truncate long field values to N bytes in output [default: 8].
                                 Use 0 for unlimited.
 
@@ -150,6 +151,16 @@ class AnsiColors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     UNDERLINE_OFF = '\033[24m'
+    # Background colors for layer visualization (256-color mode, dark subtle tones)
+    LAYER_BG = [
+        '\033[48;5;238m',  # Layer 0: medium dark gray (visible on black)
+        '\033[48;5;17m',   # Layer 1: dark blue
+        '\033[48;5;52m',   # Layer 2: dark red
+        '\033[48;5;22m',   # Layer 3: dark green
+        '\033[48;5;53m',   # Layer 4: dark purple
+        '\033[48;5;23m',   # Layer 5: dark cyan
+    ]
+    BG_RESET = '\033[49m'
 
 
 def field_matches_filter(field_name: str, field_path: str, filter_fields: list) -> bool:
@@ -433,7 +444,7 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
     
     return result_string_field_names + "\n" + result_string_field_values
 
-def get_message_explanation_string_tree(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32):
+def get_message_explanation_string_tree(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32, protocol_chain: list = None, layer_colors: bool = False):
     """Format validation result as a tree structure.
 
     Args:
@@ -443,8 +454,13 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         filter_fields: List of field names/paths to include (None = all fields)
         coco_file: CocoFile for looking up enum values (for "N (Enum.Member)" format)
         field_bytes_limit: Maximum bytes to show for field values (0 = unlimited)
+        protocol_chain: List of layer field names for layer coloring (e.g., ["eth", "ip", "tcp"])
+        layer_colors: Whether to apply background colors based on layer depth
     """
     lines = []
+    layer_fields = set(protocol_chain) if protocol_chain else set()
+    # Map layer field names to their position in the chain for consistent coloring
+    layer_positions = {name: idx for idx, name in enumerate(protocol_chain)} if protocol_chain else {}
 
     def format_enum_display(value: str) -> str:
         """Format enum value as 'N (Enum.Member)' if possible."""
@@ -517,24 +533,67 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
         return truncate_field_value(hex_val, field_bytes_limit)
 
-    def build_prefix(ancestors: list[bool]) -> str:
+    def build_prefix(ancestors: list[bool], layer_stack: list[int] = None) -> str:
         """Build prefix string from ancestor continuation flags.
 
         Args:
             ancestors: List of booleans, True if that ancestor level needs a continuation line (│)
+            layer_stack: List of layer indices for each ancestor level (for coloring)
         """
+        if layer_stack is None:
+            layer_stack = []
+
         prefix = ""
-        for needs_line in ancestors:
-            prefix += "│   " if needs_line else "    "
+        for i, needs_line in enumerate(ancestors):
+            segment = "│   " if needs_line else "    "
+            # Apply layer color if available for this level
+            if layer_colors and i < len(layer_stack) and layer_stack[i] >= 0:
+                bg_color = AnsiColors.LAYER_BG[layer_stack[i] % len(AnsiColors.LAYER_BG)]
+                segment = f"{bg_color}{segment}{AnsiColors.BG_RESET}"
+            prefix += segment
         return prefix
 
-    def add_field(field_result: DecodeResult, ancestors: list[bool] = None, metadata=None, is_last=False, parent_path: str = ""):
+    def build_connector(connector: str, layer_idx: int) -> str:
+        """Build a connector (├── or └──) with optional layer coloring."""
+        if layer_colors and layer_idx >= 0:
+            bg_color = AnsiColors.LAYER_BG[layer_idx % len(AnsiColors.LAYER_BG)]
+            return f"{bg_color}{connector}{AnsiColors.BG_RESET}"
+        return connector
+
+    def format_line_content(content: str, layer_idx: int) -> str:
+        """Wrap line content with layer background color if enabled."""
+        if layer_colors and layer_idx >= 0:
+            bg_color = AnsiColors.LAYER_BG[layer_idx % len(AnsiColors.LAYER_BG)]
+            return f"{bg_color}{content}{AnsiColors.BG_RESET}"
+        return content
+
+    def get_effective_layer(layer_stack: list[int]) -> int:
+        """Get the last valid (non-negative) layer index from the stack."""
+        for idx in reversed(layer_stack):
+            if idx >= 0:
+                return idx
+        return -1
+
+    def add_field(field_result: DecodeResult, ancestors: list[bool] = None, metadata=None, is_last=False, parent_path: str = "", layer_stack: list[int] = None, base_layer_idx: int = -1):
         """Add a field to the tree."""
         if ancestors is None:
             ancestors = []
+        if layer_stack is None:
+            layer_stack = []
 
         name = field_result.name if field_result.name else "+"
         field_path = f"{parent_path}.{name}" if parent_path else name
+
+        # Check if this field is a layer field - use its position in the chain
+        # For root-level fields (empty layer_stack), use base_layer_idx if field is not itself a layer
+        field_layer_idx = layer_positions.get(name, -1)
+        if field_layer_idx >= 0:
+            current_layer_idx = field_layer_idx
+        elif not layer_stack and base_layer_idx >= 0:
+            # Root-level non-layer field: use base layer
+            current_layer_idx = base_layer_idx
+        else:
+            current_layer_idx = -1
 
         # Check if this field or any descendants match the filter
         self_matches = field_matches_filter(name, field_path, filter_fields)
@@ -544,8 +603,9 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         if not self_matches and not descendants_match:
             return
 
-        prefix = build_prefix(ancestors)
-        connector = "└── " if is_last else "├── "
+        prefix = build_prefix(ancestors, layer_stack)
+        connector_str = "└── " if is_last else "├── "
+        connector = build_connector(connector_str, current_layer_idx)
 
         # Color based on validity
         if field_result.is_valid:
@@ -555,18 +615,28 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
         value = format_value(field_result, metadata)
 
+        # Determine background layer: use current if it's a layer, otherwise last valid layer from stack
+        content_layer_idx = current_layer_idx if current_layer_idx >= 0 else get_effective_layer(layer_stack)
+
         if value is not None:
-            lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{name}{AnsiColors.ENDC}: {color}{value}{AnsiColors.ENDC}")
+            content = f"{AnsiColors.BOLD}{name}{AnsiColors.ENDC}: {color}{value}{AnsiColors.ENDC}"
+            lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
         else:
             # Nested structure
-            lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{name}{AnsiColors.ENDC}:")
+            content = f"{AnsiColors.BOLD}{name}{AnsiColors.ENDC}:"
+            lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
             if has_nested:
                 # Pass down whether this level needs continuation
                 new_ancestors = ancestors + [not is_last]
-                add_nested_dict(field_result.decoded_value, new_ancestors, field_path)
+                # Add effective layer to stack for nested content (preserves parent layer for non-layer fields)
+                new_layer_stack = layer_stack + [content_layer_idx]
+                add_nested_dict(field_result.decoded_value, new_ancestors, field_path, new_layer_stack)
 
-    def add_nested_dict(d: dict, ancestors: list[bool], parent_path: str = ""):
+    def add_nested_dict(d: dict, ancestors: list[bool], parent_path: str = "", layer_stack: list[int] = None):
         """Add a nested dict to the tree. Values are FieldValue objects."""
+        if layer_stack is None:
+            layer_stack = []
+
         # Filter items to only those that match or have matching descendants
         filtered_items = []
         for k, v in d.items():
@@ -583,14 +653,21 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             if self_matches or descendants_match or is_list_with_matches:
                 filtered_items.append((k, v))
 
-        prefix = build_prefix(ancestors)
+        prefix = build_prefix(ancestors, layer_stack)
 
         for i, (k, v) in enumerate(filtered_items):
             is_last = (i == len(filtered_items) - 1)
-            connector = "└── " if is_last else "├── "
+            connector_str = "└── " if is_last else "├── "
 
             # Build field path for metadata lookup
             field_path = f"{parent_path}.{k}" if parent_path else k
+
+            # Check if this field is a layer field - use its position in the chain
+            layer_idx = layer_positions.get(k, -1)
+
+            # Determine content background: use layer_idx if it's a layer, else last valid layer from stack
+            content_layer_idx = layer_idx if layer_idx >= 0 else get_effective_layer(layer_stack)
+            connector = build_connector(connector_str, content_layer_idx)
 
             # Extract hex and decoded value from FieldValue
             if isinstance(v, FieldValue):
@@ -601,20 +678,27 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 actual_val = v
 
             if isinstance(actual_val, dict):
-                lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:")
+                content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:"
+                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
                 new_ancestors = ancestors + [not is_last]
-                add_nested_dict(actual_val, new_ancestors, field_path)
+                new_layer_stack = layer_stack + [content_layer_idx]
+                add_nested_dict(actual_val, new_ancestors, field_path, new_layer_stack)
             elif isinstance(actual_val, list):
-                lines.append(f"{prefix}{connector}{AnsiColors.BOLD}{k}{AnsiColors.ENDC}: [{len(actual_val)} items]")
+                content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}: [{len(actual_val)} items]"
+                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
                 list_ancestors = ancestors + [not is_last]
-                list_prefix = build_prefix(list_ancestors)
+                new_layer_stack = layer_stack + [content_layer_idx]
+                list_prefix = build_prefix(list_ancestors, new_layer_stack)
                 for j, item in enumerate(actual_val):
                     item_is_last = (j == len(actual_val) - 1)
-                    item_connector = "└── " if item_is_last else "├── "
+                    item_connector_str = "└── " if item_is_last else "├── "
+                    item_connector = build_connector(item_connector_str, content_layer_idx)
                     if isinstance(item, dict):
-                        lines.append(f"{list_prefix}{item_connector}[{j}]:")
+                        item_content = f"[{j}]:"
+                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
                         item_ancestors = list_ancestors + [not item_is_last]
-                        add_nested_dict(item, item_ancestors, f"{field_path}[{j}]")
+                        item_layer_stack = new_layer_stack + [content_layer_idx]
+                        add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack)
                     else:
                         # List items that are FieldValue
                         if isinstance(item, FieldValue):
@@ -624,7 +708,8 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                         # Apply truncation to list items
                         if isinstance(item_display, str):
                             item_display = truncate_field_value(item_display, field_bytes_limit)
-                        lines.append(f"{list_prefix}{item_connector}[{j}]: {AnsiColors.OKGREEN}{item_display}{AnsiColors.ENDC}")
+                        item_content = f"[{j}]: {AnsiColors.OKGREEN}{item_display}{AnsiColors.ENDC}"
+                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
             else:
                 color = AnsiColors.OKGREEN
                 skip_truncation = False
@@ -656,7 +741,8 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 if not skip_truncation and isinstance(formatted_value, str):
                     formatted_value = truncate_field_value(formatted_value, field_bytes_limit)
 
-                lines.append(f"{prefix}{connector}{k}: {color}{formatted_value}{AnsiColors.ENDC}")
+                content = f"{k}: {color}{formatted_value}{AnsiColors.ENDC}"
+                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
 
     # Process all fields - filter to only show relevant ones
     visible_fields = []
@@ -669,14 +755,19 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         if self_matches or descendants_match:
             visible_fields.append(field)
 
+    # Determine base layer for root-level fields (use first layer in chain if available)
+    base_layer_idx = 0 if protocol_chain else -1
+
     for i, field in enumerate(visible_fields):
         is_last = (i == len(visible_fields) - 1) and not validation_result.remaining_bytes
         metadata = fields_metadata.get(field.name) if fields_metadata else None
-        add_field(field, ancestors=[], metadata=metadata, is_last=is_last)
+        add_field(field, ancestors=[], metadata=metadata, is_last=is_last, base_layer_idx=base_layer_idx)
 
     # Add remaining bytes if any (only if no filter or filter is None)
     if validation_result.remaining_bytes and filter_fields is None:
-        lines.append(f"└── {AnsiColors.BOLD}+remaining{AnsiColors.ENDC}: {AnsiColors.FAIL}{validation_result.remaining_bytes}{AnsiColors.ENDC}")
+        remaining_connector = build_connector("└── ", base_layer_idx)
+        remaining_content = f"{AnsiColors.BOLD}+remaining{AnsiColors.ENDC}: {AnsiColors.FAIL}{validation_result.remaining_bytes}{AnsiColors.ENDC}"
+        lines.append(f"{remaining_connector}{format_line_content(remaining_content, base_layer_idx)}")
 
     return "\n".join(lines)
 
@@ -1291,7 +1382,7 @@ def cli_main():
                 # Build field metadata for display formatters (including nested)
                 msg = coco_file.get_message(args["<message_name>"])
                 fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
-                print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit))
+                print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"]))
             else:
                 validate_result = validation_result_to_tuple(result)
 
@@ -1320,11 +1411,13 @@ def cli_main():
                     if args["--dissect"] == True or filter_fields is not None:
                         msg = coco_file.get_message(result.message_name)
                         fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
-                        print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
+                        chain_name = ":".join(result.protocol_chain) if result.protocol_chain else result.message_name
+                        print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=chain_name))
                     else:
                         # Just message name, no field dissection
                         status = "OK" if result.is_valid else "ERR"
-                        print(f"{status}  {result.message_name}")
+                        chain_name = ":".join(result.protocol_chain) if result.protocol_chain else result.message_name
+                        print(f"{status}  {chain_name}")
                     if not result.is_valid:
                         ret = 1
                     if args["--list"] == False:
@@ -1337,7 +1430,7 @@ def cli_main():
                         # Build field metadata for display formatters (including nested)
                         msg = coco_file.get_message(result.message_name)
                         fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
-                        explanation = "\n" + get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit)
+                        explanation = "\n" + get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"])
                     elif args["--verbose"] == True:
                         explanation = "\n" + get_message_explanation_string(validate_tuple, validate_tuple[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
                     else:
@@ -1346,7 +1439,11 @@ def cli_main():
                     if not result.is_valid:
                         ret = 1
 
-                name_string = result.message_name
+                # Use protocol chain if available, otherwise message name
+                if result.protocol_chain:
+                    name_string = ":".join(result.protocol_chain)
+                else:
+                    name_string = result.message_name
                 number_of_whitespaces = max_name_len - len(name_string) + 2
 
                 if args["--list"] == False:

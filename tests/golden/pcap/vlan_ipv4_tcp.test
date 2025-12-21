@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: VLAN + IPv4 + TCP packet from real pcap
+
+COMMAND="./scripts/pcap2hex.sh tests/pcaps/vlan.pcap 1 | python3 protococo.py find --cocofile=protocols/ip.coco --dissect"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/pcap/fixtures/vlan_ipv4_tcp.expected"

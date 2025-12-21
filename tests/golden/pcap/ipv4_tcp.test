@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: IPv4 + TCP packet from real pcap
+
+COMMAND="./scripts/pcap2hex.sh tests/pcaps/tcp_https.pcap 1 | python3 protococo.py find --cocofile=protocols/ip.coco --dissect"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/pcap/fixtures/ipv4_tcp.expected"

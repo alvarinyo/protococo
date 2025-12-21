@@ -244,6 +244,7 @@ class Message:
     parent: str | None = None  # Name of parent message if extends
     fields: list[Field] = field(default_factory=list)
     overrides: list[Override] = field(default_factory=list)
+    is_layer: bool = False  # True if this message represents a protocol layer
 
 
 # === File ===

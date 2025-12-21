@@ -107,7 +107,7 @@ message tcp_option_unknown extends tcp_option {
 
 // TCP segment (RFC 793)
 // Bytes 12-13 contain data_offset (4b) + reserved (4b) + flags (8b) = 16 bits
-message tcp_segment {
+layer message tcp_segment {
   u16 src_port [display: port]
   u16 dst_port [display: port]
   u32 seq_num
@@ -135,7 +135,7 @@ message tcp_segment {
 }
 
 // UDP datagram (RFC 768)
-message udp_datagram {
+layer message udp_datagram {
   u16 src_port [display: port]
   u16 dst_port [display: port]
   u16 length
@@ -144,7 +144,7 @@ message udp_datagram {
 }
 
 // ICMP message (RFC 792)
-message icmp_message {
+layer message icmp_message {
   IcmpType icmp_type
   u8 code
   u16 checksum
@@ -158,7 +158,7 @@ message icmp_message {
 // ============================================================================
 
 // ARP packet for IPv4 over Ethernet
-message arp_packet {
+layer message arp_packet {
   u16 hw_type           // 1 = Ethernet
   u16 proto_type        // 0x0800 = IPv4
   u8 hw_len             // 6 for Ethernet
@@ -197,7 +197,7 @@ message ipv4_header {
 }
 
 // IPv4 packet with polymorphic payload based on protocol field
-message ipv4_packet {
+layer message ipv4_packet {
   ipv4_header header
   bytes payload[header.total_length - 20] match header.protocol {
     Protocol.TCP -> tcp_segment tcp
@@ -226,7 +226,7 @@ message ipv6_header {
 }
 
 // IPv6 packet with polymorphic payload based on next_header field
-message ipv6_packet {
+layer message ipv6_packet {
   ipv6_header header
   bytes payload[header.payload_length] match header.next_header {
     Protocol.TCP -> tcp_segment tcp
@@ -240,39 +240,37 @@ message ipv6_packet {
 // Ethernet (IEEE 802.3)
 // ============================================================================
 
-// Ethernet header (14 bytes)
-message ethernet_header {
+// Ethernet header (14 bytes) - marked as layer so 'eth' appears in chain
+layer message ethernet_header {
   bytes dst_mac[6] [display: mac]
   bytes src_mac[6] [display: mac]
   EtherType ethertype
 }
 
-// 802.1Q VLAN tag (4 bytes total, but ethertype already consumed)
-message vlan_tag {
+// 802.1Q VLAN frame (tag + inner payload)
+layer message vlan_frame {
   bits[16] tci {
     bits[12] vlan_id
     bit dei               // Drop Eligible Indicator
     bits[3] pcp           // Priority Code Point
   }
   EtherType inner_ethertype
+  bytes inner[] match inner_ethertype {
+    EtherType.IPV4 -> ipv4_packet ip
+    EtherType.IPV6 -> ipv6_packet ip6
+    EtherType.ARP -> arp_packet arp
+    _ -> {}
+  }
 }
 
 // Ethernet frame with polymorphic payload based on ethertype
-message ethernet_frame {
+layer message ethernet_frame {
   ethernet_header eth
   bytes payload[] match eth.ethertype {
     EtherType.IPV4 -> ipv4_packet ip
     EtherType.IPV6 -> ipv6_packet ip6
     EtherType.ARP -> arp_packet arp
-    EtherType.VLAN -> {
-      vlan_tag vlan
-      bytes inner[] match vlan.inner_ethertype {
-        EtherType.IPV4 -> ipv4_packet ip
-        EtherType.IPV6 -> ipv6_packet ip6
-        EtherType.ARP -> arp_packet arp
-        _ -> {}
-      }
-    }
+    EtherType.VLAN -> vlan_frame vlan
     _ -> {}
   }
 }
