@@ -1289,18 +1289,80 @@ def cli_main():
     field_bytes_limit = int(args["--field-bytes-limit"]) if args["--field-bytes-limit"] else 32
 
     if args["tree"] == True:
-        # Build and print inheritance tree
+        # Build and print layer message containment tree based on match clauses
         from treelib import Tree
-        tree = Tree()
-        tree.create_node("messages", "root")
+        from coco_ast import EnumTypeRef
 
-        # Add all messages, tracking parents
+        # Get all layer messages
+        layer_messages = {msg.name for msg in coco_file.messages if msg.is_layer}
+
+        def get_contained_layers(msg) -> list[tuple[str, str]]:
+            """Find layer messages contained via match clauses.
+            Returns list of (field_name, message_name) tuples.
+            """
+            contained = []
+            fields = decoder.resolve_message(msg)
+
+            def check_fields(fields_list):
+                for field in fields_list:
+                    # Check if field type is a layer message
+                    if isinstance(field.type, EnumTypeRef):
+                        type_name = field.type.enum_name
+                        if type_name in layer_messages:
+                            contained.append((field.name, type_name))
+
+                    # Check match clause branches
+                    if field.match_clause:
+                        for branch in field.match_clause.branches:
+                            if branch.fields:
+                                check_fields(branch.fields)
+
+                    # Check structure body
+                    if field.structure_body:
+                        check_fields(field.structure_body)
+
+            check_fields(fields)
+            return contained
+
+        # Build containment graph
+        containment = {}
         for msg in coco_file.messages:
-            parent_id = msg.parent if msg.parent else "root"
-            if not tree.contains(parent_id) and parent_id != "root":
-                # Parent not yet added, add as child of root
-                tree.create_node(parent_id, parent_id, parent="root")
-            tree.create_node(msg.name, msg.name, parent=parent_id)
+            if msg.is_layer:
+                containment[msg.name] = get_contained_layers(msg)
+
+        # Find root layer messages (not contained by any other)
+        all_contained = set()
+        for contained_list in containment.values():
+            for _, msg_name in contained_list:
+                all_contained.add(msg_name)
+        roots = [name for name in layer_messages if name not in all_contained]
+
+        # Build tree with full expansion (allow duplicates via unique node IDs)
+        tree = Tree()
+        node_counter = [0]
+
+        def add_subtree(msg_name: str, parent_id: str, depth: int = 0):
+            # Limit depth to prevent infinite recursion in case of cycles
+            if depth > 10:
+                return
+
+            node_counter[0] += 1
+            node_id = f"{msg_name}_{node_counter[0]}"
+            tree.create_node(msg_name, node_id, parent=parent_id)
+
+            for field_name, child_msg in containment.get(msg_name, []):
+                add_subtree(child_msg, node_id, depth + 1)
+
+        # If single root, use it directly; otherwise use "protocols" wrapper
+        if len(roots) == 1:
+            root_name = roots[0]
+            tree.create_node(root_name, "root")
+            for field_name, child_msg in containment.get(root_name, []):
+                add_subtree(child_msg, "root")
+        else:
+            tree.create_node("protocols", "root")
+            for root in sorted(roots):
+                add_subtree(root, "root")
 
         tree.show()
 

@@ -180,6 +180,17 @@ class Decoder:
                 break
         return False
 
+    def _get_chain_name(self, msg_name: str) -> str:
+        """Get short name for protocol chain display.
+
+        Strips common suffixes like _frame, _packet, _segment for cleaner output.
+        E.g., ethernet_frame -> ethernet, ipv4_packet -> ipv4
+        """
+        for suffix in ('_frame', '_packet', '_segment', '_datagram', '_message'):
+            if msg_name.endswith(suffix):
+                return msg_name[:-len(suffix)]
+        return msg_name
+
     def get_constant_value(self, name: str) -> int | str | None:
         """Look up a constant by name."""
         const = self.coco_file.get_constant(name)
@@ -1021,6 +1032,10 @@ class Decoder:
 
         # Reset protocol chain for this validation
         self._protocol_chain = []
+
+        # Add root layer message to chain (uses message name since there's no field name)
+        if msg.is_layer:
+            self._protocol_chain.append(self._get_chain_name(msg.name))
 
         results = []
         context = {}

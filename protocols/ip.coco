@@ -240,8 +240,8 @@ layer message ipv6_packet {
 // Ethernet (IEEE 802.3)
 // ============================================================================
 
-// Ethernet header (14 bytes) - marked as layer so 'eth' appears in chain
-layer message ethernet_header {
+// Ethernet header (14 bytes)
+message ethernet_header {
   bytes dst_mac[6] [display: mac]
   bytes src_mac[6] [display: mac]
   EtherType ethertype
