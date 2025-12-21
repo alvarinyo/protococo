@@ -17,7 +17,7 @@ Usage:
                       [--cocofile=<file>]
   protococo tree   [--cocofile=<file>]
   protococo mspec  <message_name> [--cocofile=<file>]
-  protococo wireshark [<message_name>] [--cocofile=<file>]
+  protococo wireshark [<message_name>] [--cocofile=<file>] [--stack]
 
 Options:
   -h --help                 Show this screen.
@@ -1422,8 +1422,9 @@ def cli_main():
         from wireshark_gen import generate_lua_dissector
 
         message_name = args["<message_name>"]
+        stack_mode = args.get("--stack", False)
         try:
-            lua_code = generate_lua_dissector(coco_file, message_name)
+            lua_code = generate_lua_dissector(coco_file, message_name, stack_mode=stack_mode)
             print(lua_code)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
