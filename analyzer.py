@@ -35,6 +35,7 @@ class DecodeResult:
     expected_hex: str | None = None  # For fixed-value fields
     errors: list[str] = None
     is_constrained: bool = False  # True if field has enum type or default value
+    is_unbounded: bool = False  # True if field consumed remaining bytes without explicit size
 
     def __post_init__(self):
         if self.errors is None:
@@ -158,6 +159,22 @@ class ValidationResult:
             if isinstance(field.decoded_value, (dict, list)):
                 total += scan_value(field.decoded_value)
         return total
+
+    @property
+    def has_unbounded_fields(self) -> bool:
+        """Check if any field consumed remaining bytes without explicit size.
+
+        Messages with unbounded fields (bytes[] with no size) require encapsulation
+        from a lower layer to be meaningful. When parsed at root level without
+        encapsulation, such messages are semantically incomplete.
+        """
+        def check_fields(fields: list[DecodeResult]) -> bool:
+            for f in fields:
+                if f.is_unbounded:
+                    return True
+            return False
+
+        return check_fields(self.fields)
 
 
 class Decoder:
@@ -536,6 +553,16 @@ class Decoder:
                 if embedded_msg and self._message_has_constraints(embedded_msg):
                     is_constrained = True
 
+        # Determine if field is unbounded (bytes[] or string[] with no explicit size)
+        # Such fields require encapsulation from a lower layer to be meaningful
+        # Exception: fields with match clauses have implicit structure from nested messages
+        is_unbounded = (
+            isinstance(field.size, VariableSize) and
+            isinstance(field_type, (BytesType, StringType)) and
+            not (isinstance(field_type, StringType) and field_type.is_cstr) and  # cstr has implicit delimiter
+            not field.match_clause  # match clause provides structure via nested messages
+        )
+
         return DecodeResult(
             name=field.name,
             hex_value=hex_value,
@@ -544,6 +571,7 @@ class Decoder:
             expected_hex=expected_hex,
             errors=errors,
             is_constrained=is_constrained,
+            is_unbounded=is_unbounded,
         )
 
     def _get_message_fixed_size(self, msg: Message, context: dict) -> int | None:
@@ -1121,10 +1149,12 @@ class Decoder:
             result = self.validate_message(msg, hex_str)
             results.append(result)
 
-        # Sort by: valid first, then by validated constraints, then penalize invalid nested elements,
-        # then by structured fields, then by matched bytes, then by inheritance depth
+        # Sort by: valid first, penalize unbounded fields at root, then by validated constraints,
+        # then penalize invalid nested elements, then by structured fields, then by matched bytes,
+        # then by inheritance depth
         results.sort(key=lambda r: (
             not r.is_valid,
+            r.has_unbounded_fields,       # Penalize messages with unbounded bytes[] at root level
             -r.validated_constraints,     # Prefer messages with more validated enum/default fields
             r.minimal_array_elements,     # Penalize messages with many single-field array elements
             -r.total_structured_fields,   # Prefer messages that parse into more leaf fields

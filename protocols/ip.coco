@@ -55,6 +55,46 @@ enum TcpOptKind : u8 {
   TIMESTAMPS = 8
 }
 
+// DNS OpCodes (RFC 1035)
+enum DnsOpCode : u8 {
+  QUERY = 0,
+  IQUERY = 1,
+  STATUS = 2
+}
+
+// DNS Response Codes (RFC 1035)
+enum DnsRCode : u8 {
+  NO_ERROR = 0,
+  FORMAT_ERROR = 1,
+  SERVER_FAILURE = 2,
+  NAME_ERROR = 3,
+  NOT_IMPLEMENTED = 4,
+  REFUSED = 5
+}
+
+// DNS Question Types (RFC 1035 and extensions)
+enum DnsQType : u16 {
+  A = 1,
+  NS = 2,
+  CNAME = 5,
+  SOA = 6,
+  PTR = 12,
+  MX = 15,
+  TXT = 16,
+  AAAA = 28,
+  SRV = 33,
+  ANY = 255
+}
+
+// DNS Question Classes (RFC 1035)
+enum DnsQClass : u16 {
+  IN = 1,
+  CS = 2,
+  CH = 3,
+  HS = 4,
+  ANY = 255
+}
+
 // ============================================================================
 // Transport Layer Protocols (reusable)
 // ============================================================================
@@ -140,7 +180,139 @@ layer message udp_datagram {
   u16 dst_port [display: port]
   u16 length
   u16 checksum
-  bytes data[length - 8]
+  bytes data[length - 8] match dst_port {
+    53 -> dns_message dns
+    _ -> {}
+  }
+}
+
+// ============================================================================
+// DNS (RFC 1035)
+// ============================================================================
+
+// DNS header (12 bytes)
+message dns_header {
+  u16 transaction_id
+  bits[16] flags {
+    bit rcode3          // RCODE bit 3
+    bit rcode2          // RCODE bit 2
+    bit rcode1          // RCODE bit 1
+    bit rcode0          // RCODE bit 0
+    bit checking_disabled
+    bit authenticated_data
+    bit z_reserved
+    bit recursion_available
+    bit recursion_desired
+    bit truncated
+    bit authoritative
+    bit opcode3         // OPCODE bit 3
+    bit opcode2         // OPCODE bit 2
+    bit opcode1         // OPCODE bit 1
+    bit opcode0         // OPCODE bit 0
+    bit qr_response     // 0=query, 1=response
+  }
+  u16 question_count
+  u16 answer_count
+  u16 authority_count
+  u16 additional_count
+}
+
+// DNS label (length-prefixed string, part of domain name encoding)
+// DNS names are sequences of labels ending with 0x00
+// e.g., "www.example.com" = 03 77 77 77 07 65 78 61 6d 70 6c 65 03 63 6f 6d 00
+message dns_label {
+  u8 length
+  bytes label[length]
+}
+
+// DNS question section entry
+message dns_question {
+  // QNAME: sequence of labels (variable length, ends with 0x00)
+  // Note: This simplified version doesn't handle label compression (pointers)
+  bytes qname[]          // Domain name as label sequence
+  DnsQType qtype
+  DnsQClass qclass
+}
+
+// Base DNS resource record (common fields)
+message dns_rr {
+  bytes name[]           // Domain name (may use compression pointers)
+  DnsQType rr_type
+  DnsQClass rr_class
+  u32 ttl
+  u16 rd_length
+  bytes rdata[rd_length]
+}
+
+// DNS A record (IPv4 address)
+message dns_rr_a extends dns_rr {
+  rr_type = DnsQType.A
+  rd_length = 4
+  rdata {
+    u32 address [display: ipv4]
+  }
+}
+
+// DNS AAAA record (IPv6 address)
+message dns_rr_aaaa extends dns_rr {
+  rr_type = DnsQType.AAAA
+  rd_length = 16
+  rdata {
+    bytes address[16] [display: ipv6]
+  }
+}
+
+// DNS CNAME record (canonical name)
+message dns_rr_cname extends dns_rr {
+  rr_type = DnsQType.CNAME
+  rdata {
+    bytes cname[]        // Domain name
+  }
+}
+
+// DNS NS record (name server)
+message dns_rr_ns extends dns_rr {
+  rr_type = DnsQType.NS
+  rdata {
+    bytes nsdname[]      // Name server domain name
+  }
+}
+
+// DNS MX record (mail exchange)
+message dns_rr_mx extends dns_rr {
+  rr_type = DnsQType.MX
+  rdata {
+    u16 preference
+    bytes exchange[]     // Mail exchange domain name
+  }
+}
+
+// DNS PTR record (pointer)
+message dns_rr_ptr extends dns_rr {
+  rr_type = DnsQType.PTR
+  rdata {
+    bytes ptrdname[]     // Pointer domain name
+  }
+}
+
+// DNS TXT record (text strings)
+message dns_rr_txt extends dns_rr {
+  rr_type = DnsQType.TXT
+  rdata {
+    bytes txt_data[]     // One or more character strings
+  }
+}
+
+// Complete DNS message (query or response)
+layer message dns_message {
+  dns_header header
+  // Note: Full question/answer parsing would require dynamic arrays
+  // For now, this provides the header structure and can be extended
+  // with specific question/answer parsing based on counts
+  bytes questions[]      // question_count questions
+  // bytes answers[]        // answer_count answers
+  // bytes authority[]      // authority_count authority RRs
+  // bytes additional[]     // additional_count additional RRs
 }
 
 // ICMP message (RFC 792)

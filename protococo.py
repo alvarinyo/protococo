@@ -4,6 +4,7 @@
 Usage:
   protococo check  <message_name> [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
+                      [--dissect-fields=<comma_separated_fields>]
                       [--verbose --decode --decode-no-newlines --tree --layer-colors]
                       [--field-bytes-limit=<n>]
   protococo find   [<message_hex_string> ...]
@@ -1433,6 +1434,8 @@ def cli_main():
     elif args["check"] == True:
         messages_input = [sys.stdin.read()] if not args["<message_hex_string>"] else args["<message_hex_string>"]
 
+        filter_fields = [f.strip() for f in args["--dissect-fields"].split(",")] if args["--dissect-fields"] is not None else None
+
         for message_hex_string in messages_input:
             result = decoder.validate_by_name(args["<message_name>"], message_hex_string)
 
@@ -1440,12 +1443,12 @@ def cli_main():
                 # Porcelain format: machine-readable, space-padded columns
                 msg = coco_file.get_message(args["<message_name>"])
                 fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
-                print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
+                print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
             elif args["--tree"] or args["--format"] == "tree":
                 # Build field metadata for display formatters (including nested)
                 msg = coco_file.get_message(args["<message_name>"])
                 fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
-                print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"]))
+                print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"]))
             else:
                 validate_result = validation_result_to_tuple(result)
 
@@ -1453,7 +1456,7 @@ def cli_main():
                 if args["--verbose"] == True:
                     explanation_logs = validate_result[3]
 
-                print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
+                print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
 
             if not result.is_valid:
                 ret = 1
