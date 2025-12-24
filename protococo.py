@@ -292,7 +292,7 @@ def validation_result_to_tuple(result: ValidationResult):
         validation_decoded_dict
     )
     
-def get_message_explanation_string_compact(validation_result, filter_fields = None, decode=False, no_newlines=False):
+def get_message_explanation_string_compact(validation_result, filter_fields = None, decode=False, no_newlines=False, field_bytes_limit: int = 32):
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
 
     result_string = ""
@@ -302,41 +302,49 @@ def get_message_explanation_string_compact(validation_result, filter_fields = No
         field_name = k.split('.')[-1] if k and '.' in k else k
         if not field_matches_filter(field_name, k, filter_fields):
             continue
-        
+
         odd ^= 1
-        
+
         field_complies = validation_diff_dict[k]
-        
+
         k_adj, v_adj = k, v
-        
-        if decode == True and k in validation_decoded_dict.keys():
+        is_decoded = decode == True and k in validation_decoded_dict.keys()
+
+        if is_decoded:
             v_adj = validation_decoded_dict[k]
-        
+
+        # Apply field bytes limit truncation
+        # Only truncate hex values or simple decoded strings, not structured representations
+        if field_bytes_limit > 0:
+            # Don't truncate structured decoded values (dicts, lists)
+            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+
         fail_color = AnsiColors.FAIL if odd == 1 else AnsiColors.FAIL2
         ok_color = AnsiColors.OKGREEN if odd == 1 else AnsiColors.OKCYAN
         if not field_complies:
             color = fail_color
         else:
             color = ok_color
-        
+
         v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
-            
+
         if decode == True and k in validation_decoded_dict.keys():
             if no_newlines:
                 v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
             else:
                 v_adj = f"({v_adj})"
-            
+
         if k_adj is not None:
             result_string += f"{v_adj}"
         else:   # Overflowing bytes field
             result_string += f"|+{v_adj}"
-    
 
-    
+
+
     return result_string
 
-def get_message_explanation_string_oneline(validation_result, filter_fields = None, decode=False, no_newlines=False):
+def get_message_explanation_string_oneline(validation_result, filter_fields = None, decode=False, no_newlines=False, field_bytes_limit: int = 32):
 
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
 
@@ -349,39 +357,47 @@ def get_message_explanation_string_oneline(validation_result, filter_fields = No
         field_name = k.split('.')[-1] if k and '.' in k else k
         if not field_matches_filter(field_name, k, filter_fields):
             continue
-        
+
         field_complies = validation_diff_dict[k]
-        
+
         k_adj, v_adj = k, v
-        
-        if decode == True and k in validation_decoded_dict.keys():
+        is_decoded = decode == True and k in validation_decoded_dict.keys()
+
+        if is_decoded:
             v_adj = validation_decoded_dict[k]
-        
+
+        # Apply field bytes limit truncation
+        # Only truncate hex values or simple decoded strings, not structured representations
+        if field_bytes_limit > 0:
+            # Don't truncate structured decoded values (dicts, lists)
+            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+
         if not field_complies:
             color = fail_color
         else:
             color = ok_color
-        
+
         v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
-            
+
         if decode == True and k in validation_decoded_dict.keys():
             if no_newlines:
                 v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
             else:
                 v_adj = f"({v_adj})"
-            
+
         if k_adj is not None:
             k_adj = AnsiColors.BOLD + k_adj + AnsiColors.ENDC
             result_string += f"|{k_adj}: {v_adj}"
         else:   # Overflowing bytes field
             result_string += f"|+{v_adj}"
-    
+
     if len(result_string) > 0:
         result_string += "|"
-    
+
     return result_string
 
-def get_message_explanation_string_multiline(validation_result, filter_fields = None, decode=False, no_newlines=False):
+def get_message_explanation_string_multiline(validation_result, filter_fields = None, decode=False, no_newlines=False, field_bytes_limit: int = 32):
 
     _, validation_result_dict, validation_diff_dict, __, validation_decoded_dict = validation_result
 
@@ -395,18 +411,26 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
         field_name = k.split('.')[-1] if k and '.' in k else k
         if not field_matches_filter(field_name, k, filter_fields):
             continue
-        
+
         field_complies = validation_diff_dict[k]
-        
+
         k_adj, v_adj = k, v
-        
-        if decode == True and k in validation_decoded_dict.keys():
+        is_decoded = decode == True and k in validation_decoded_dict.keys()
+
+        if is_decoded:
             v_adj = validation_decoded_dict[k]
-        
+
+        # Apply field bytes limit truncation
+        # Only truncate hex values or simple decoded strings, not structured representations
+        if field_bytes_limit > 0:
+            # Don't truncate structured decoded values (dicts, lists)
+            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+
         if k_adj is None:
             k_adj = "+"
             v_adj = "+" + v
-        
+
         lendiff = len(k_adj) - len(v_adj)
 
         if decode == True and k in validation_decoded_dict.keys():
@@ -415,12 +439,12 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
                 v_adj = f"({v_adj})".replace("\r", "").replace("\n", f"{AnsiColors.PURPLE}\\n{AnsiColors.UNDERLINE_OFF + AnsiColors.BOLD + color}")
             else:
                 v_adj = f"({v_adj})"
-        
+
         if not field_complies:
             color = fail_color
         else:
             color = ok_color
-        
+
         v_adj = AnsiColors.BOLD + color + v_adj + AnsiColors.ENDC
             
         if lendiff < 0:
@@ -986,16 +1010,16 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
     return "\n".join(lines)
 
 
-def get_message_explanation_string(validation_result, validation_log_dict = None, fmt="oneline", filter_fields = None, decode = False, no_newlines=False):
+def get_message_explanation_string(validation_result, validation_log_dict = None, fmt="oneline", filter_fields = None, decode = False, no_newlines=False, field_bytes_limit: int = 32):
 
     _, validation_result_dict, validation_diff_dict, __, ___ = validation_result
 
     if fmt == "oneline":
-        result_string = get_message_explanation_string_oneline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
+        result_string = get_message_explanation_string_oneline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines, field_bytes_limit=field_bytes_limit)
     elif fmt == "compact":
-        result_string = get_message_explanation_string_compact(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
+        result_string = get_message_explanation_string_compact(validation_result, filter_fields, decode=decode, no_newlines=no_newlines, field_bytes_limit=field_bytes_limit)
     else:
-        result_string = get_message_explanation_string_multiline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines)
+        result_string = get_message_explanation_string_multiline(validation_result, filter_fields, decode=decode, no_newlines=no_newlines, field_bytes_limit=field_bytes_limit)
 
     logs_string = ""
     if validation_log_dict is not None and len(validation_log_dict) > 0:
@@ -1512,7 +1536,7 @@ def cli_main():
                 if args["--verbose"] == True:
                     explanation_logs = validate_result[3]
 
-                print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"]))
+                print(get_message_explanation_string(validate_result, explanation_logs, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"], field_bytes_limit=field_bytes_limit))
 
             if not result.is_valid:
                 ret = 1
@@ -1554,9 +1578,9 @@ def cli_main():
                         fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
                         explanation = "\n" + get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"])
                     elif args["--verbose"] == True:
-                        explanation = "\n" + get_message_explanation_string(validate_tuple, validate_tuple[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
+                        explanation = "\n" + get_message_explanation_string(validate_tuple, validate_tuple[3], fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"], field_bytes_limit=field_bytes_limit)
                     else:
-                        explanation = get_message_explanation_string(validate_tuple, None, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"])
+                        explanation = get_message_explanation_string(validate_tuple, None, fmt=args["--format"], filter_fields=filter_fields, decode=args["--decode"], no_newlines=args["--decode-no-newlines"], field_bytes_limit=field_bytes_limit)
 
                     if not result.is_valid:
                         ret = 1
