@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize,
     EnumValue, MatchClause,
     Endianness,
 )
@@ -362,6 +362,28 @@ class Decoder:
         field_type = field.type
         errors = []
 
+        # Special handling for branch-determined size [*]
+        # The match clause determines the size by consuming bytes
+        if isinstance(field.size, BranchDeterminedSize):
+            if not field.match_clause:
+                return DecodeResult(
+                    name=field.name,
+                    hex_value="",
+                    decoded_value=None,
+                    is_valid=False,
+                    errors=["Branch-determined size [*] requires a match clause"]
+                )
+            # Decode match clause and let it determine how many bytes to consume
+            decoded_value, consumed_hex = self._decode_match_consuming(hex_str, field.match_clause, context)
+            hex_value = hex_str[:consumed_hex]
+            return DecodeResult(
+                name=field.name,
+                hex_value=hex_value,
+                decoded_value=decoded_value,
+                is_valid=True,
+                errors=[]
+            )
+
         # Determine field size
         size_bytes = self._get_field_size(field, context, len(hex_str) // 2)
         if size_bytes is None:
@@ -680,8 +702,14 @@ class Decoder:
         if isinstance(size, SizeExpr):
             return self._eval_size_expr(size, context)
 
+        if isinstance(size, GreedySize):
+            # Greedy size - consume all remaining bytes from outer layer
+            return remaining_bytes if remaining_bytes > 0 else None
+
         if isinstance(size, VariableSize):
             # Variable size can't be determined without remaining_bytes context
+            # Note: In new syntax, bare [] should have been converted to BranchDeterminedSize
+            # This is a fallback for safety
             return remaining_bytes if remaining_bytes > 0 else None
 
         return remaining_bytes if remaining_bytes > 0 else None
@@ -856,6 +884,81 @@ class Decoder:
 
         return {"raw": FieldValue(hex_str, hex_str)}
 
+    def _decode_match_consuming(self, hex_str: str, match_clause: MatchClause, context: dict) -> tuple[dict, int]:
+        """Decode a match clause and return (decoded_value, consumed_hex_chars).
+
+        Used for branch-determined size [*] where the match branch determines
+        the size of the containing field.
+
+        Args:
+            hex_str: Full remaining hex string (not pre-sliced)
+            match_clause: The match clause to evaluate
+            context: Context with already decoded values
+
+        Returns:
+            Tuple of (decoded dict, consumed hex characters count)
+        """
+        # Resolve dotted path discriminator (e.g., "header.protocol")
+        discriminator_value = self._resolve_path(match_clause.discriminator, context)
+
+        # Find matching branch
+        matching_branch = None
+        default_branch = None
+
+        for branch in match_clause.branches:
+            if branch.pattern is None:
+                default_branch = branch
+            elif isinstance(branch.pattern, EnumValue):
+                # Check enum value match
+                enum_str = f"{branch.pattern.enum_name}.{branch.pattern.member_name}"
+                if discriminator_value == enum_str:
+                    matching_branch = branch
+                    break
+                # Also check raw integer value
+                enum_def = self.get_enum(branch.pattern.enum_name)
+                if enum_def:
+                    member = enum_def.get_member_by_name(branch.pattern.member_name)
+                    if member and discriminator_value == member.value:
+                        matching_branch = branch
+                        break
+            elif branch.pattern == discriminator_value:
+                matching_branch = branch
+                break
+
+        branch = matching_branch or default_branch
+        if branch and branch.fields:
+            # Decode branch fields and track consumed bytes
+            result, consumed = self._decode_structure_consuming(hex_str, branch.fields, context)
+            return result, consumed
+
+        # Empty branch - consume 0 bytes
+        return {}, 0
+
+    def _decode_structure_consuming(self, hex_str: str, fields: list[Field], parent_context: dict) -> tuple[dict, int]:
+        """Decode a structure and return (decoded_value, consumed_hex_chars).
+
+        Similar to _decode_structure but returns consumed hex char count for
+        branch-determined sizing.
+        """
+        result = {}
+        context = dict(parent_context)
+        offset = 0
+
+        for field in fields:
+            remaining = hex_str[offset:]
+            if not remaining:
+                break
+
+            decode_result = self.decode_field(remaining, field, context)
+            result[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
+            context[field.name] = decode_result.decoded_value
+            if isinstance(decode_result.decoded_value, dict):
+                self._flatten_to_context(field.name, decode_result.decoded_value, context)
+
+            offset += len(decode_result.hex_value)
+
+        return result, offset
+
     def _decode_structure(self, hex_str: str, fields: list[Field], parent_context: dict, track_validity: bool = False) -> dict | tuple[dict, bool]:
         """Decode a nested structure.
 
@@ -996,7 +1099,8 @@ class Decoder:
             saved_chain = list(self._protocol_chain)
 
             for candidate in candidate_types:
-                candidate_result = self.validate_message(candidate, remaining)
+                # Allow remaining bytes for array elements (they consume only what they need)
+                candidate_result = self.validate_message(candidate, remaining, allow_remaining=True)
 
                 # Calculate consumed bytes for this candidate
                 candidate_hex_len = sum(len(f.hex_value) for f in candidate_result.fields)
@@ -1020,7 +1124,7 @@ class Decoder:
 
             # If no subtype matched, try the fallback (base) type
             if best_result is None and fallback_type is not None:
-                fallback_result = self.validate_message(fallback_type, remaining)
+                fallback_result = self.validate_message(fallback_type, remaining, allow_remaining=True)
                 fallback_hex_len = sum(len(f.hex_value) for f in fallback_result.fields)
                 if fallback_hex_len > 0:
                     best_result = fallback_result
@@ -1045,12 +1149,13 @@ class Decoder:
         # Return list and consumed byte count (offset is in hex chars, divide by 2)
         return result, offset // 2
 
-    def validate_message(self, msg: Message, hex_str: str) -> ValidationResult:
+    def validate_message(self, msg: Message, hex_str: str, allow_remaining: bool = False) -> ValidationResult:
         """Validate a hex message against a message definition.
 
         Args:
             msg: Message definition
             hex_str: Hex string to validate
+            allow_remaining: If True, don't fail on remaining bytes (for polymorphic arrays)
 
         Returns:
             ValidationResult with field-by-field results
@@ -1072,7 +1177,10 @@ class Decoder:
 
         for field in fields:
             remaining = hex_str[offset:]
-            if not remaining and not isinstance(field.size, VariableSize):
+            # Allow empty remaining for GreedySize and BranchDeterminedSize
+            # (BranchDeterminedSize can consume 0 bytes for empty match branches)
+            # (GreedySize consumes all remaining, including 0 bytes)
+            if not remaining and not isinstance(field.size, (GreedySize, BranchDeterminedSize)):
                 # Not enough bytes
                 results.append(DecodeResult(
                     name=field.name,
@@ -1118,8 +1226,12 @@ class Decoder:
 
         remaining_bytes = hex_str[offset:]
 
+        # For polymorphic arrays, we allow remaining bytes since each element
+        # should only consume what it needs
+        is_fully_valid = all_valid and (allow_remaining or len(remaining_bytes) == 0)
+
         return ValidationResult(
-            is_valid=all_valid and len(remaining_bytes) == 0,
+            is_valid=is_fully_valid,
             message_name=msg.name,
             fields=results,
             remaining_bytes=remaining_bytes,

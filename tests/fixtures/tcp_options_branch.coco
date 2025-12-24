@@ -1,0 +1,50 @@
+version 1.0
+endian be
+
+// TCP options using branch-determined size [] instead of inheritance
+// This demonstrates that [] with match can replace inheritance for polymorphic structures
+
+enum TcpOptKind : u8 {
+  END = 0,
+  NOP = 1,
+  MSS = 2,
+  WINDOW_SCALE = 3,
+  SACK_PERMITTED = 4,
+  TIMESTAMPS = 8
+}
+
+// TCP option using [] for branch-determined size
+// Each branch has different structure and size
+message tcp_option {
+  TcpOptKind kind
+  bytes rest[] match kind {
+    TcpOptKind.NOP -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.END -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.MSS -> {
+      u8 length = 0x04
+      u16 mss
+    }
+    TcpOptKind.WINDOW_SCALE -> {
+      u8 length = 0x03
+      u8 shift_count
+    }
+    TcpOptKind.SACK_PERMITTED -> {
+      u8 length = 0x02
+    }
+    TcpOptKind.TIMESTAMPS -> {
+      u8 length = 0x0A
+      u32 ts_val
+      u32 ts_ecr
+    }
+    _ -> {
+      // Unknown option - uses size-from-match for data
+      u8 length
+      bytes data[length - 2]
+    }
+  }
+}
+
+// Test array of options
+message tcp_options_array {
+  tcp_option options[...]  // Greedy - consumes all remaining
+}

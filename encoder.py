@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr,
     Endianness,
 )
 

@@ -26,6 +26,6 @@ message shorthand_match_message {
   bytes payload[payload_length] match msg_type {
     MsgType.TEXT -> text_payload content
     MsgType.BINARY -> binary_payload content
-    _ -> { bytes raw[] }
+    _ -> { bytes raw[...] }
   }
 }

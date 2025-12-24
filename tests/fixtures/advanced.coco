@@ -38,9 +38,9 @@ message polymorphic_message {
   u8 payload_length
 
   bytes payload[payload_length] match msg_type {
-    MsgType.TEXT -> { string text[] }
-    MsgType.BINARY -> { bytes raw_data[] }
-    _ -> { bytes unknown[] }
+    MsgType.TEXT -> { string text[...] }
+    MsgType.BINARY -> { bytes raw_data[...] }
+    _ -> { bytes unknown[...] }
   }
 
   u8 etx = ETX
@@ -68,7 +68,7 @@ message detailed_wrapper extends wrapper {
 message nested_wrapper extends detailed_wrapper {
   body.data {
     u16 id
-    string name[]
+    string name[...]
   }
 }
 
@@ -81,14 +81,14 @@ message command_response {
   bytes response[response_length] match cmd_type {
     0x01 -> {
       u8 status
-      string message[]
+      string message[...]
     }
     0x02 -> {
       u16 error_code
       u32 timestamp
     }
     _ -> {
-      bytes raw[]
+      bytes raw[...]
     }
   }
 

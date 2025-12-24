@@ -614,10 +614,48 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         else:
             color = AnsiColors.FAIL
 
-        value = format_value(field_result, metadata)
-
         # Determine background layer: use current if it's a layer, otherwise last valid layer from stack
         content_layer_idx = current_layer_idx if current_layer_idx >= 0 else get_effective_layer(layer_stack)
+
+        # Check if this field uses branch-determined size [*] and should be flattened
+        from coco_ast import BranchDeterminedSize
+        is_branch_determined = metadata and isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
+
+        # If branch-determined and has nested content, flatten it at this level
+        if is_branch_determined and has_nested:
+            # Don't show this field name, just show its contents flattened
+            add_nested_dict(field_result.decoded_value, ancestors, parent_path, layer_stack)
+            return
+
+        # Handle arrays
+        if isinstance(field_result.decoded_value, list):
+            content = f"{AnsiColors.BOLD}{name}{AnsiColors.ENDC}: [{len(field_result.decoded_value)} items]"
+            lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
+            list_ancestors = ancestors + [not is_last]
+            new_layer_stack = layer_stack + [content_layer_idx]
+            list_prefix = build_prefix(list_ancestors, new_layer_stack)
+            for j, item in enumerate(field_result.decoded_value):
+                item_is_last = (j == len(field_result.decoded_value) - 1)
+                item_connector_str = "└── " if item_is_last else "├── "
+                item_connector = build_connector(item_connector_str, content_layer_idx)
+                if isinstance(item, dict):
+                    item_content = f"[{j}]:"
+                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+                    item_ancestors = list_ancestors + [not item_is_last]
+                    item_layer_stack = new_layer_stack + [content_layer_idx]
+                    add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack)
+                else:
+                    # List items that might be FieldValue
+                    from analyzer import FieldValue
+                    if isinstance(item, FieldValue):
+                        item_display = item.hex if not decode else str(item.val)
+                    else:
+                        item_display = str(item)
+                    item_content = f"[{j}]: {color}{item_display}{AnsiColors.ENDC}"
+                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+            return
+
+        value = format_value(field_result, metadata)
 
         if value is not None:
             content = f"{AnsiColors.BOLD}{name}{AnsiColors.ENDC}: {color}{value}{AnsiColors.ENDC}"
@@ -679,11 +717,25 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 actual_val = v
 
             if isinstance(actual_val, dict):
-                content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:"
-                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
-                new_ancestors = ancestors + [not is_last]
-                new_layer_stack = layer_stack + [content_layer_idx]
-                add_nested_dict(actual_val, new_ancestors, field_path, new_layer_stack)
+                # Check if this field uses branch-determined size [*] and should be flattened
+                from coco_ast import BranchDeterminedSize
+                import re
+                # Strip array indices from field_path for metadata lookup
+                # e.g., "options[0].rest" -> "options.rest"
+                field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+                metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k) if fields_metadata else None
+                is_branch_determined = metadata and isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
+
+                if is_branch_determined:
+                    # Flatten: don't show field name, just show its contents at this level
+                    add_nested_dict(actual_val, ancestors, parent_path, layer_stack)
+                else:
+                    # Normal nested dict: show field name and nest contents
+                    content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:"
+                    lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
+                    new_ancestors = ancestors + [not is_last]
+                    new_layer_stack = layer_stack + [content_layer_idx]
+                    add_nested_dict(actual_val, new_ancestors, field_path, new_layer_stack)
             elif isinstance(actual_val, list):
                 content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}: [{len(actual_val)} items]"
                 lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
@@ -1371,7 +1423,7 @@ def cli_main():
         # Print message specification
         from coco_ast import (
             IntegerType, BytesType, StringType, PadType, BitFieldType, EnumTypeRef,
-            LiteralSize, FieldRefSize, VariableSize
+            LiteralSize, FieldRefSize, VariableSize, GreedySize, BranchDeterminedSize
         )
 
         def format_type(field_type):
@@ -1407,6 +1459,10 @@ def cli_main():
                         size_str = f"[{field.size.value}]"
                     elif isinstance(field.size, FieldRefSize):
                         size_str = f"[{field.size.field_name}]"
+                    elif isinstance(field.size, GreedySize):
+                        size_str = "[...]"
+                    elif isinstance(field.size, BranchDeterminedSize):
+                        size_str = "[]"
                     elif isinstance(field.size, VariableSize):
                         size_str = "[]"
                 default_str = ""

@@ -68,7 +68,10 @@ bitfield_type: "bits" "[" DEC_NUMBER "]"
 size_spec: "[" size_value "]"
 
 size_value: size_expr       // expression (includes simple values)
-          |                 // empty = variable length
+          | GREEDY_SIZE     // greedy size [...] - consumes all remaining
+          |                 // empty = variable length (or branch-determined with match)
+
+GREEDY_SIZE.2: "..."  // Higher priority than operators
 
 // Size expressions with arithmetic
 ?size_expr: size_term

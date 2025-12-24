@@ -7,7 +7,7 @@ Generates Wireshark Lua dissector code from .coco protocol definitions.
 from coco_ast import (
     CocoFile, Message, Field, EnumDef,
     IntegerType, BytesType, StringType, PadType, BitFieldType, EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr,
     MatchClause, EnumValue,
 )
 
@@ -471,6 +471,9 @@ class LuaGenerator:
             left = self._size_to_lua(size.left, context_prefix)
             right = self._size_to_lua(size.right, context_prefix)
             return f"({left} {size.op} {right})"
+        elif isinstance(size, GreedySize):
+            # Greedy size - consume rest of buffer (-1 means "to end" in Wireshark)
+            return "-1"
         elif isinstance(size, VariableSize):
             return "nil"
         return "nil"

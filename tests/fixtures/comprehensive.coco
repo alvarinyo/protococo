@@ -44,7 +44,7 @@ message text_message {
   u8 stx = STX
   u8 name_length
   string name[name_length]
-  string:cstr description[]
+  string:cstr description[...]
   u8 etx = ETX
 }
 
@@ -52,7 +52,7 @@ message text_message {
 message annotated_message {
   u8 msg_type [display: hex, doc: "Message type identifier"]
   u16:be timestamp [display: decimal, doc: "Unix timestamp"]
-  bytes payload[] [doc: "Variable length payload"]
+  bytes payload[...] [doc: "Variable length payload (greedy)"]
 }
 
 // Message with explicit endianness

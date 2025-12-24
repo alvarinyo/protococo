@@ -557,6 +557,28 @@ $ protococo wireshark ethernet_frame --cocofile=protocols/ip.coco --stack > ip_s
 $ wireshark -X lua_script:ip_stack.lua capture.pcap
 ```
 
+## Syntax Highlighting
+
+Syntax highlighting for `.coco` files is available for Vim/Neovim and bat.
+
+### Vim/Neovim
+
+```bash
+mkdir -p ~/.vim/syntax ~/.vim/ftdetect
+cp syntax/coco.vim ~/.vim/syntax/
+cp ftdetect/coco.vim ~/.vim/ftdetect/
+```
+
+### Bat (for terminal)
+
+```bash
+mkdir -p ~/.config/bat/syntaxes
+cp syntax/coco.sublime-syntax ~/.config/bat/syntaxes/
+batcat cache --build
+```
+
+See [syntax/README.md](syntax/README.md) for detailed installation instructions and features.
+
 ## License
 
 See LICENSE file for details.

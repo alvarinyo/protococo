@@ -1,1 +1,1 @@
-[1m[92m[ethernet:vlan:arp][0m          [1m[92mffffffffffff00104bd128238100[0m[1m[96m006c0806000108000604000100104bd1282383976c8b00000000000083976ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe[0m
+[1m[92m[tcp][0m              [1m[92mffff[0m[1m[96mffff[0m[1m[92mffff0010[0m[1m[96m4bd12823[0m[1m[92m8100[0m[1m[96m006c[0m[1m[92m0806[0m[1m[96m0001[0m[1m[92m08000604000100104bd1[0m[1m[96m282383976c8b00000000000083976ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe6ffe[0m

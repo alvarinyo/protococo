@@ -1,0 +1,30 @@
+version 1.0
+endian le
+
+// Binary Data Packet protocol
+
+const STX = 0x02
+const ETX = 0x03
+
+message binary_data_packet_1byte {
+  u8 stx = STX                   // STX
+  u8 msg_id = 0x23               // BINARY DATA PACKET
+  u8 body_length                 // MESSAGE BODY LENGTH
+  bytes body[body_length]        // MESSAGE BODY
+  u16 checksum                   // CHECKSUM
+  u8 etx = ETX                   // ETX
+}
+
+message binary_data_packet_2byte {
+  u8 stx = STX                   // STX
+  u8 msg_id = 0x25               // BINARY DATA PACKET
+  u16 body_length                // MESSAGE BODY LENGTH
+  bytes body[body_length]        // MESSAGE BODY
+  u16 checksum                   // CHECKSUM
+  u8 etx = ETX                   // ETX
+}
+
+message mime_chunk {
+  u8 seq_num                     // SEQUENCE NUMBER
+  bytes data[...]                // MIME DATA (greedy)
+}

@@ -10,7 +10,7 @@ from coco_ast import (
     CocoFile, Constant, EnumDef, EnumMember, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef, MessageTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize,
     EnumValue, FieldAttributes, DisplayFormat,
     MatchClause, MatchBranch,
     ValueOverride, StructureOverride,
@@ -56,6 +56,32 @@ class CocoTransformer(Transformer):
 
     def ENDIAN(self, token):
         return Endianness.LITTLE if str(token) == "le" else Endianness.BIG
+
+    # === Helper Methods ===
+
+    def _validate_and_normalize_size(self, size, match_clause, field_name):
+        """Validate size specification and convert VariableSize to BranchDeterminedSize when needed.
+
+        Args:
+            size: The size specification (VariableSize, GreedySize, etc.)
+            match_clause: The match clause (if any)
+            field_name: Field name for error messages
+
+        Returns:
+            Normalized size (converts VariableSize to BranchDeterminedSize if used with match)
+
+        Raises:
+            ValueError: If bare [] is used without match clause
+        """
+        if isinstance(size, VariableSize):
+            if match_clause is None:
+                raise ValueError(
+                    f"Field '{field_name}': Bare [] requires a match clause. "
+                    f"Use [...] for greedy matching or add a match clause."
+                )
+            # Convert VariableSize to BranchDeterminedSize when used with match
+            return BranchDeterminedSize()
+        return size
 
     # === Header ===
 
@@ -150,7 +176,7 @@ class CocoTransformer(Transformer):
         if first == "bytes":
             size = None
             for item in items[1:]:
-                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                     size = item
             return (BytesType(), size)
 
@@ -161,7 +187,7 @@ class CocoTransformer(Transformer):
             for item in items[1:]:
                 if item == "cstr":
                     is_cstr = True
-                elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                     size = item
             return (StringType(is_cstr=is_cstr), size)
 
@@ -169,7 +195,7 @@ class CocoTransformer(Transformer):
         if first == "pad":
             size = None
             for item in items[1:]:
-                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                     size = item
             return (PadType(), size)
 
@@ -189,7 +215,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[2:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -197,6 +223,9 @@ class CocoTransformer(Transformer):
                 attrs = item
             elif item is not None:
                 default = item
+
+        # Validate and normalize size
+        size = self._validate_and_normalize_size(size, match, field_name)
 
         return Field(
             name=field_name,
@@ -249,6 +278,9 @@ class CocoTransformer(Transformer):
         if len(items) == 0:
             return VariableSize()
         val = items[0]
+        # Handle greedy size: [...] (GREEDY_SIZE token)
+        if isinstance(val, Token) and (val.type == 'GREEDY_SIZE' or str(val) == "..."):
+            return GreedySize()
         # If it's already a SizeSpec (from expression), return it
         if isinstance(val, (LiteralSize, FieldRefSize, SizeExpr)):
             return val
@@ -409,7 +441,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -417,6 +449,9 @@ class CocoTransformer(Transformer):
                 attrs = item
             elif item is not None:
                 default = item
+
+        # Validate and normalize size
+        size = self._validate_and_normalize_size(size, match, name)
 
         return Field(
             name=name,
@@ -445,7 +480,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -453,6 +488,9 @@ class CocoTransformer(Transformer):
                 attrs = item
             elif item is not None:
                 default = item
+
+        # Validate and normalize size
+        size = self._validate_and_normalize_size(size, match, name)
 
         return Field(
             name=name,
@@ -473,12 +511,15 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
             elif item is not None:
                 default = item
+
+        # Validate and normalize size (pad fields don't have match clauses)
+        size = self._validate_and_normalize_size(size, None, "_pad")
 
         return Field(
             name="_pad",  # Anonymous padding
@@ -542,7 +583,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[2:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, SizeExpr)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -550,6 +591,9 @@ class CocoTransformer(Transformer):
                 attrs = item
             elif item is not None:
                 default = item
+
+        # Validate and normalize size
+        size = self._validate_and_normalize_size(size, match, field_name)
 
         return Field(
             name=field_name,

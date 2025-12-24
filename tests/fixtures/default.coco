@@ -29,7 +29,7 @@ message base_2byte {
 message binary_data_packet extends base_1byte {
   msg_type = 0x23            // Binary data packet type
   body {
-    bytes data[]             // Binary data
+    bytes data[...]          // Binary data (greedy)
   }
 }
 
@@ -37,6 +37,6 @@ message binary_data_packet extends base_1byte {
 message response extends base_1byte {
   body {
     u8 status                // Status code
-    bytes payload[]          // Response payload
+    bytes payload[...]       // Response payload (greedy)
   }
 }

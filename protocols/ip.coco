@@ -99,50 +99,35 @@ enum DnsQClass : u16 {
 // Transport Layer Protocols (reusable)
 // ============================================================================
 
-// Base TCP option - subtypes define specific options
-// Uses polymorphic array parsing: tcp_option[] tries all subtypes
+// TCP option using match with [] for branch-determined size
+// Each branch has different structure and size - replaces inheritance
 message tcp_option {
   TcpOptKind kind
-}
-
-// Single-byte options (no length field)
-message tcp_option_nop extends tcp_option {
-  kind = TcpOptKind.NOP
-}
-
-message tcp_option_end extends tcp_option {
-  kind = TcpOptKind.END
-}
-
-// Multi-byte options (have length field)
-message tcp_option_mss extends tcp_option {
-  kind = TcpOptKind.MSS
-  u8 length = 0x04
-  u16 mss
-}
-
-message tcp_option_window_scale extends tcp_option {
-  kind = TcpOptKind.WINDOW_SCALE
-  u8 length = 0x03
-  u8 shift_count
-}
-
-message tcp_option_sack_permitted extends tcp_option {
-  kind = TcpOptKind.SACK_PERMITTED
-  u8 length = 0x02
-}
-
-message tcp_option_timestamps extends tcp_option {
-  kind = TcpOptKind.TIMESTAMPS
-  u8 length = 0x0A
-  u32 ts_val
-  u32 ts_ecr
-}
-
-// Fallback for unknown options (reads kind + length + data)
-message tcp_option_unknown extends tcp_option {
-  u8 length
-  bytes data[length - 2]
+  bytes rest[] match kind {
+    TcpOptKind.NOP -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.END -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.MSS -> {
+      u8 length = 0x04
+      u16 mss
+    }
+    TcpOptKind.WINDOW_SCALE -> {
+      u8 length = 0x03
+      u8 shift_count
+    }
+    TcpOptKind.SACK_PERMITTED -> {
+      u8 length = 0x02
+    }
+    TcpOptKind.TIMESTAMPS -> {
+      u8 length = 0x0A
+      u32 ts_val
+      u32 ts_ecr
+    }
+    _ -> {
+      // Unknown option - uses size-from-match for data
+      u8 length
+      bytes data[length - 2]
+    }
+  }
 }
 
 // TCP segment (RFC 793)
@@ -171,7 +156,7 @@ layer message tcp_segment {
   u16 urgent_ptr
   // Options parsed as polymorphic array - tries all tcp_option subtypes
   tcp_option options[data_offset_flags.data_offset * 4 - 20]
-  bytes data[]
+  bytes data[...]  // Payload - greedy, consumes remaining from upper layer
 }
 
 // UDP datagram (RFC 768)
@@ -229,14 +214,14 @@ message dns_label {
 message dns_question {
   // QNAME: sequence of labels (variable length, ends with 0x00)
   // Note: This simplified version doesn't handle label compression (pointers)
-  bytes qname[]          // Domain name as label sequence
+  bytes qname[...]       // Domain name as label sequence (greedy)
   DnsQType qtype
   DnsQClass qclass
 }
 
 // Base DNS resource record (common fields)
 message dns_rr {
-  bytes name[]           // Domain name (may use compression pointers)
+  bytes name[...]        // Domain name (may use compression pointers) (greedy)
   DnsQType rr_type
   DnsQClass rr_class
   u32 ttl
@@ -266,7 +251,7 @@ message dns_rr_aaaa extends dns_rr {
 message dns_rr_cname extends dns_rr {
   rr_type = DnsQType.CNAME
   rdata {
-    bytes cname[]        // Domain name
+    bytes cname[...]     // Domain name (greedy)
   }
 }
 
@@ -274,7 +259,7 @@ message dns_rr_cname extends dns_rr {
 message dns_rr_ns extends dns_rr {
   rr_type = DnsQType.NS
   rdata {
-    bytes nsdname[]      // Name server domain name
+    bytes nsdname[...]   // Name server domain name (greedy)
   }
 }
 
@@ -283,7 +268,7 @@ message dns_rr_mx extends dns_rr {
   rr_type = DnsQType.MX
   rdata {
     u16 preference
-    bytes exchange[]     // Mail exchange domain name
+    bytes exchange[...]  // Mail exchange domain name (greedy)
   }
 }
 
@@ -291,7 +276,7 @@ message dns_rr_mx extends dns_rr {
 message dns_rr_ptr extends dns_rr {
   rr_type = DnsQType.PTR
   rdata {
-    bytes ptrdname[]     // Pointer domain name
+    bytes ptrdname[...]  // Pointer domain name (greedy)
   }
 }
 
@@ -299,7 +284,7 @@ message dns_rr_ptr extends dns_rr {
 message dns_rr_txt extends dns_rr {
   rr_type = DnsQType.TXT
   rdata {
-    bytes txt_data[]     // One or more character strings
+    bytes txt_data[...]  // One or more character strings (greedy)
   }
 }
 
@@ -309,10 +294,10 @@ layer message dns_message {
   // Note: Full question/answer parsing would require dynamic arrays
   // For now, this provides the header structure and can be extended
   // with specific question/answer parsing based on counts
-  bytes questions[]      // question_count questions
-  // bytes answers[]        // answer_count answers
-  // bytes authority[]      // authority_count authority RRs
-  // bytes additional[]     // additional_count additional RRs
+  bytes questions[...]   // question_count questions (greedy)
+  // bytes answers[...]     // answer_count answers (greedy)
+  // bytes authority[...]   // authority_count authority RRs (greedy)
+  // bytes additional[...]  // additional_count additional RRs (greedy)
 }
 
 // ICMP message (RFC 792)
@@ -322,7 +307,7 @@ layer message icmp_message {
   u16 checksum
   u16 identifier
   u16 sequence
-  bytes data[]
+  bytes data[...]        // Payload (greedy)
 }
 
 // ============================================================================

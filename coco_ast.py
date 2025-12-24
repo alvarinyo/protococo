@@ -142,6 +142,12 @@ class VariableSize:
 
 
 @dataclass
+class GreedySize:
+    """Greedy size [...] - consumes all remaining bytes from outer layer"""
+    pass
+
+
+@dataclass
 class SizeExpr:
     """Arithmetic size expression: [length - 8], [count * 4]"""
     op: str  # '+', '-', '*'
@@ -149,7 +155,17 @@ class SizeExpr:
     right: 'SizeSpec'
 
 
-SizeSpec = LiteralSize | FieldRefSize | VariableSize | SizeExpr | None
+@dataclass
+class BranchDeterminedSize:
+    """Size determined by matched branch: [*]
+
+    Used with match clauses where different branches have different sizes.
+    The parser will decode the match branch and use consumed bytes as size.
+    """
+    pass
+
+
+SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | BranchDeterminedSize | None
 
 
 # === Values ===
