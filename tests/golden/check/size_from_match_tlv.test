@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: size_from_match_tlv
+
+COMMAND="python3 protococo.py check tlv_option 0103414243 --cocofile=tests/fixtures/size_from_match.coco --decode"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/size_from_match_tlv.expected"

@@ -1,0 +1,1 @@
+([1m[92m[{'kind': FieldValue(hex='01', val='TcpOptKind.NOP'), 'rest': FieldValue(hex='', val={})}, {'kind': FieldValue(hex='02', val='TcpOptKind.MSS'), 'rest': FieldValue(hex='0405b4', val={'length': FieldValue(hex='04', val=4), 'mss': FieldValue(hex='05b4', val=1460)})}, {'kind': FieldValue(hex='01', val='TcpOptKind.NOP'), 'rest': FieldValue(hex='', val={})}][0m)

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: branch_size_unknown
+
+COMMAND="python3 protococo.py check tcp_option 6305AABBCC --cocofile=tests/fixtures/tcp_options_branch.coco --decode"
+EXPECTED_EXIT=1
+EXPECTED_OUTPUT="tests/golden/check/fixtures/branch_size_unknown.expected"

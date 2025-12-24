@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: size_from_match_nested
+
+COMMAND="python3 protococo.py check nested_match 010103414243 --cocofile=tests/fixtures/size_from_match.coco --decode"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/size_from_match_nested.expected"

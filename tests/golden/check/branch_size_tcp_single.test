@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: branch_size_tcp_single
+
+COMMAND="python3 protococo.py check tcp_option 020405B4 --cocofile=tests/fixtures/tcp_options_branch.coco --decode"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/branch_size_tcp_single.expected"
