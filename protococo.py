@@ -6,12 +6,12 @@ Usage:
                       [--cocofile=<file> --format=<option>]
                       [--dissect-fields=<comma_separated_fields>]
                       [--verbose --decode --decode-no-newlines --tree --layer-colors]
-                      [--field-bytes-limit=<n>]
+                      [-L <n> | --field-bytes-limit=<n>]
   protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
                       [--list --verbose --decode --decode-no-newlines --long-names --tree --layer-colors]
-                      [--field-bytes-limit=<n>]
+                      [-L <n> | --field-bytes-limit=<n>]
   protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
   protococo json-recipe <message_names> ...
@@ -37,7 +37,8 @@ Options:
   --list                    Include a list of the most fitting messages in find results.
   --tree                    Display dissected fields as a tree structure.
   --layer-colors            Color tree background by protocol layer depth (requires --tree).
-  --field-bytes-limit=<n>   Truncate long field values to N bytes in output [default: 8].
+  -L <n>, --field-bytes-limit=<n>
+                            Truncate long field values to N bytes in output [default: 8].
                                 Use 0 for unlimited.
 
 """
@@ -1363,7 +1364,7 @@ def cli_main():
     max_name_len = max(len(m.name) for m in coco_file.messages) if coco_file.messages else 0
 
     # Parse field bytes limit (default 32, 0=unlimited)
-    field_bytes_limit = int(args["--field-bytes-limit"]) if args["--field-bytes-limit"] else 32
+    field_bytes_limit = int(args.get("-L") or args.get("--field-bytes-limit") or 32)
 
     if args["tree"] == True:
         # Build and print layer message containment tree based on match clauses
