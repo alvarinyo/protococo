@@ -1,0 +1,12 @@
+version 1.0
+endian be
+
+include "transport.coco"
+
+// Application layer using transport layer
+
+message application_message {
+  simple_packet packet
+  Color color
+  u8 flags
+}

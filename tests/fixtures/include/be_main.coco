@@ -1,0 +1,12 @@
+version 1.0
+endian be
+
+include "different_endian.coco"
+
+// Big-endian main file including a little-endian file
+// The LE fields should preserve their endianness after baking
+
+message be_wrapper {
+  u32 be_header
+  le_packet le_data
+}

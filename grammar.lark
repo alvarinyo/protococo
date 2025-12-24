@@ -1,7 +1,7 @@
 // Protococo DSL Grammar v1.0
 // Parser: Lark (Python)
 
-start: header_section definitions
+start: header_section include_section? definitions
 
 // === Header Section ===
 header_section: version_decl endian_decl
@@ -11,6 +11,10 @@ endian_decl: "endian" ENDIAN
 
 VERSION_NUMBER: /\d+\.\d+/
 ENDIAN: "le" | "be"
+
+// === Include Section ===
+include_section: include_decl+
+include_decl: "include" STRING
 
 // === Definitions ===
 definitions: definition*

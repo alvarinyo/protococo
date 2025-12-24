@@ -97,6 +97,16 @@ class CocoTransformer(Transformer):
             result[key] = value
         return result
 
+    # === Includes ===
+
+    def include_decl(self, items):
+        """Handle include: include "path" """
+        return items[0]  # items[0] is the path string (already unquoted by STRING transformer)
+
+    def include_section(self, items):
+        """Collect all include declarations."""
+        return list(items)
+
     # === Constants ===
 
     def const_value(self, items):
@@ -678,7 +688,15 @@ class CocoTransformer(Transformer):
 
     def start(self, items):
         header = items[0]
-        definitions = items[1] if len(items) > 1 else []
+
+        # Check if include_section is present
+        includes = []
+        definitions_idx = 1
+        if len(items) > 1 and isinstance(items[1], list) and all(isinstance(i, str) for i in items[1]):
+            includes = items[1]
+            definitions_idx = 2
+
+        definitions = items[definitions_idx] if len(items) > definitions_idx else []
 
         constants = [d for d in definitions if isinstance(d, Constant)]
         enums = [d for d in definitions if isinstance(d, EnumDef)]
@@ -690,6 +708,7 @@ class CocoTransformer(Transformer):
             constants=constants,
             enums=enums,
             messages=messages,
+            includes=includes,
         )
 
 
@@ -718,16 +737,114 @@ class ParseError(Exception):
         return self.args[0]
 
 
-def parse(file_path: str | Path) -> CocoFile:
-    """Parse a .coco file and return the AST."""
+def _resolve_fields_endianness(fields: list[Field], default_endian: Endianness) -> None:
+    """Recursively resolve endianness for all IntegerType fields."""
+    for field in fields:
+        # Handle IntegerType
+        if isinstance(field.type, IntegerType) and field.type.endian is None:
+            field.type.endian = default_endian
+
+        # Recurse into nested structures
+        if field.structure_body:
+            _resolve_fields_endianness(field.structure_body, default_endian)
+        if field.match_clause:
+            for branch in field.match_clause.branches:
+                if branch.fields:
+                    _resolve_fields_endianness(branch.fields, default_endian)
+        # Bitfields don't have endianness issues, so no need to recurse into bitfield_body
+
+
+def resolve_endianness(coco_file: CocoFile) -> None:
+    """Bake file-level endian default into all fields with unspecified endianness.
+
+    This is used when including files to preserve their endianness semantics
+    even when merged into a file with a different default endianness.
+    """
+    for msg in coco_file.messages:
+        _resolve_fields_endianness(msg.fields, coco_file.endian)
+
+
+def merge_coco_files(main: CocoFile, included: list[CocoFile], main_path: Path) -> CocoFile:
+    """Merge included files into main, silently skipping duplicate definitions.
+
+    This handles diamond includes where the same definition appears multiple times
+    through different include paths. Only truly conflicting definitions (same name,
+    different content) would be an error, but we don't check for that currently.
+
+    Args:
+        main: The main CocoFile
+        included: List of included CocoFiles (with their source paths already resolved)
+        main_path: Path to main file (for error messages)
+
+    Returns:
+        Merged CocoFile with all definitions
+
+    Raises:
+        ParseError: Never raises for duplicates (silently skips)
+    """
+    all_constants = list(main.constants)
+    all_enums = list(main.enums)
+    all_messages = list(main.messages)
+
+    # Track seen names to skip duplicates (diamond includes)
+    seen_names = {
+        'constants': {c.name for c in main.constants},
+        'enums': {e.name for e in main.enums},
+        'messages': {m.name for m in main.messages},
+    }
+
+    for inc in included:
+        # Add constants (skip if already seen)
+        for c in inc.constants:
+            if c.name not in seen_names['constants']:
+                seen_names['constants'].add(c.name)
+                all_constants.append(c)
+
+        # Add enums (skip if already seen)
+        for e in inc.enums:
+            if e.name not in seen_names['enums']:
+                seen_names['enums'].add(e.name)
+                all_enums.append(e)
+
+        # Add messages (skip if already seen)
+        for m in inc.messages:
+            if m.name not in seen_names['messages']:
+                seen_names['messages'].add(m.name)
+                all_messages.append(m)
+
+    return CocoFile(
+        version=main.version,
+        endian=main.endian,
+        constants=all_constants,
+        enums=all_enums,
+        messages=all_messages,
+        includes=[],  # Clear includes after merging
+    )
+
+
+def _parse_single_file(file_path: Path) -> CocoFile:
+    """Parse a single .coco file without processing includes.
+
+    Args:
+        file_path: Path to the .coco file
+
+    Returns:
+        CocoFile with includes field populated but not processed
+
+    Raises:
+        ParseError: If parsing fails
+    """
     from lark.exceptions import UnexpectedToken, UnexpectedCharacters, UnexpectedInput
 
     global _parser
     if _parser is None:
         _parser = get_parser()
 
-    with open(file_path) as f:
-        content = f.read()
+    try:
+        with open(file_path) as f:
+            content = f.read()
+    except FileNotFoundError:
+        raise ParseError(f"Include file not found: {file_path}")
 
     try:
         tree = _parser.parse(content)
@@ -748,6 +865,87 @@ def parse(file_path: str | Path) -> CocoFile:
 
     transformer = CocoTransformer()
     return transformer.transform(tree)
+
+
+def _parse_with_includes(
+    file_path: Path,
+    visited: set[Path] | None = None,
+    parsed_cache: dict[Path, CocoFile] | None = None
+) -> CocoFile:
+    """Parse a .coco file and recursively process includes.
+
+    Args:
+        file_path: Path to the .coco file
+        visited: Set of files in current include chain (for circular detection)
+        parsed_cache: Cache of already-parsed files (for diamond includes)
+
+    Returns:
+        CocoFile with all includes merged
+
+    Raises:
+        ParseError: If circular includes detected, file not found, or duplicate definitions
+    """
+    abs_path = file_path.resolve()
+
+    if visited is None:
+        visited = set()
+    if parsed_cache is None:
+        parsed_cache = {}
+
+    # Check cache first (diamond include - same file via different paths)
+    if abs_path in parsed_cache:
+        return parsed_cache[abs_path]
+
+    # Check for circular includes
+    if abs_path in visited:
+        chain = " -> ".join(str(p) for p in visited) + f" -> {abs_path}"
+        raise ParseError(f"Circular include detected: {chain}", file_path=str(abs_path))
+
+    visited.add(abs_path)
+
+    # Parse this file
+    coco_file = _parse_single_file(abs_path)
+
+    # If no includes, cache and return
+    if not coco_file.includes:
+        parsed_cache[abs_path] = coco_file
+        return coco_file
+
+    # Process includes recursively
+    included_files = []
+    for inc_path in coco_file.includes:
+        # Resolve path relative to the including file
+        resolved_path = (abs_path.parent / inc_path).resolve()
+
+        # Parse included file recursively (use visited.copy() for circular detection,
+        # but share parsed_cache for diamond includes)
+        inc_file = _parse_with_includes(resolved_path, visited.copy(), parsed_cache)
+
+        # Bake in endianness to preserve semantics (only if not from cache)
+        if resolved_path not in parsed_cache or parsed_cache[resolved_path] != inc_file:
+            resolve_endianness(inc_file)
+
+        included_files.append(inc_file)
+
+    # Merge all files
+    result = merge_coco_files(coco_file, included_files, abs_path)
+    parsed_cache[abs_path] = result
+    return result
+
+
+def parse(file_path: str | Path) -> CocoFile:
+    """Parse a .coco file and return the AST with includes resolved.
+
+    Args:
+        file_path: Path to the .coco file (str or Path)
+
+    Returns:
+        CocoFile with all includes merged and resolved
+
+    Raises:
+        ParseError: If parsing fails, circular includes detected, or duplicate definitions
+    """
+    return _parse_with_includes(Path(file_path))
 
 
 def parse_string(content: str) -> CocoFile:

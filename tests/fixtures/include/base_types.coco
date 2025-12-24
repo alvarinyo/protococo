@@ -1,0 +1,17 @@
+version 1.0
+endian be
+
+// Basic types that can be reused across protocols
+
+enum Color : u8 {
+  RED = 1,
+  GREEN = 2,
+  BLUE = 3
+}
+
+enum Status : u8 {
+  OK = 0,
+  ERROR = 1
+}
+
+const MAX_SIZE = 255

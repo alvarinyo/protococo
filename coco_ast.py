@@ -283,6 +283,7 @@ class CocoFile:
     constants: list[Constant] = field(default_factory=list)
     enums: list[EnumDef] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
+    includes: list[str] = field(default_factory=list)  # Temporary: used during parsing, cleared after merge
 
     def get_constant(self, name: str) -> Constant | None:
         for c in self.constants:

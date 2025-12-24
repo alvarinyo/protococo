@@ -1,0 +1,17 @@
+version 1.0
+endian be
+
+include "base_types.coco"
+
+// Transport layer using base types
+
+message packet_header {
+  u8 version
+  Status status
+  u16 length
+}
+
+message simple_packet {
+  packet_header header
+  bytes data[header.length]
+}

@@ -1,0 +1,8 @@
+version 1.0
+endian be
+
+include "circular_a.coco"
+
+message msg_b {
+  u8 field_b
+}

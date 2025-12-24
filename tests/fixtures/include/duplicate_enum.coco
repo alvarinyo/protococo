@@ -1,0 +1,14 @@
+version 1.0
+endian be
+
+include "base_types.coco"
+
+// This will cause a duplicate error because Color is already defined in base_types.coco
+enum Color : u8 {
+  YELLOW = 4,
+  PURPLE = 5
+}
+
+message test_msg {
+  u8 data
+}

@@ -1,0 +1,19 @@
+version 1.0
+endian le
+
+// Little-endian file with some messages
+
+enum LEType : u8 {
+  TYPE_A = 1,
+  TYPE_B = 2
+}
+
+message le_header {
+  u16 magic
+  u16 length
+}
+
+message le_packet {
+  le_header header
+  bytes data[header.length]
+}
