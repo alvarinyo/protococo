@@ -421,6 +421,7 @@ layer message vlan_frame {
 }
 
 // Ethernet frame with polymorphic payload based on ethertype
+// Note: Ethernet has 64-byte minimum frame size (60 without FCS), so padding may be present
 layer message ethernet_frame {
   ethernet_header eth
   bytes payload[] match eth.ethertype {
@@ -430,4 +431,5 @@ layer message ethernet_frame {
     EtherType.VLAN -> vlan_frame vlan
     _ -> {}
   }
+  pad[...]  // Ethernet padding for minimum frame size
 }

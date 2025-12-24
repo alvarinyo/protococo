@@ -575,12 +575,14 @@ class Decoder:
                 if embedded_msg and self._message_has_constraints(embedded_msg):
                     is_constrained = True
 
-        # Determine if field is unbounded (bytes[] or string[] with no explicit size)
+        # Determine if field is unbounded (bytes[] or string[] with no explicit size, or greedy [...])
         # Such fields require encapsulation from a lower layer to be meaningful
         # Exception: fields with match clauses have implicit structure from nested messages
+        # Exception: pad[...] is not semantically meaningful content, so it's not penalized
         is_unbounded = (
-            isinstance(field.size, VariableSize) and
+            isinstance(field.size, (VariableSize, GreedySize)) and
             isinstance(field_type, (BytesType, StringType)) and
+            not isinstance(field_type, PadType) and  # padding is not meaningful content
             not (isinstance(field_type, StringType) and field_type.is_cstr) and  # cstr has implicit delimiter
             not field.match_clause  # match clause provides structure via nested messages
         )
@@ -704,7 +706,8 @@ class Decoder:
 
         if isinstance(size, GreedySize):
             # Greedy size - consume all remaining bytes from outer layer
-            return remaining_bytes if remaining_bytes > 0 else None
+            # 0 bytes is valid (nothing left to consume)
+            return remaining_bytes
 
         if isinstance(size, VariableSize):
             # Variable size can't be determined without remaining_bytes context
@@ -1226,9 +1229,11 @@ class Decoder:
 
         remaining_bytes = hex_str[offset:]
 
-        # For polymorphic arrays, we allow remaining bytes since each element
-        # should only consume what it needs
-        is_fully_valid = all_valid and (allow_remaining or len(remaining_bytes) == 0)
+        # Validity is based on field validation only, not remaining bytes.
+        # Remaining bytes are tracked separately and used as a ranking penalty
+        # in identify_message(), but don't make the message "invalid".
+        # For polymorphic arrays (allow_remaining=True), this is already the behavior.
+        is_fully_valid = all_valid
 
         return ValidationResult(
             is_valid=is_fully_valid,
@@ -1261,12 +1266,13 @@ class Decoder:
             result = self.validate_message(msg, hex_str)
             results.append(result)
 
-        # Sort by: valid first, penalize unbounded fields at root, then by validated constraints,
-        # then penalize invalid nested elements, then by structured fields, then by matched bytes,
-        # then by inheritance depth
+        # Sort by: valid first, penalize unbounded fields at root, penalize remaining bytes,
+        # then by validated constraints, then penalize invalid nested elements, then by structured fields,
+        # then by matched bytes, then by inheritance depth
         results.sort(key=lambda r: (
             not r.is_valid,
             r.has_unbounded_fields,       # Penalize messages with unbounded bytes[] at root level
+            len(r.remaining_bytes) > 0,   # Strongly prefer complete parses (no remaining bytes)
             -r.validated_constraints,     # Prefer messages with more validated enum/default fields
             r.minimal_array_elements,     # Penalize messages with many single-field array elements
             -r.total_structured_fields,   # Prefer messages that parse into more leaf fields
