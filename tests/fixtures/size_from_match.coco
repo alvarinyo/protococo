@@ -1,0 +1,63 @@
+version 1.0
+endian be
+
+// Test size-from-match: size expressions referencing fields decoded within match branches
+
+// Test 1: Basic size-from-match in match branch
+message tlv_option {
+  u8 type
+  bytes value[] match type {
+    1 -> {
+      u8 length
+      bytes data[length]
+    }
+    2 -> {
+      u16 length
+      bytes data[length]
+    }
+    _ -> {}
+  }
+}
+
+// Test 2: Shadowing - local 'length' overrides parent
+message shadowing_test {
+  u8 length
+  bytes payload[] match length {
+    5 -> {
+      u8 length           // Shadows parent (5 -> local value)
+      bytes data[length]  // Uses local length
+    }
+    _ -> {}
+  }
+}
+
+// Test 3: Expression with local field
+message expr_test {
+  u8 type
+  bytes body[] match type {
+    1 -> {
+      u8 len
+      u8 flags
+      bytes data[len - 2]
+    }
+    _ -> {}
+  }
+}
+
+// Test 4: Nested match with size-from-match
+message nested_match {
+  u8 outer_type
+  bytes outer[] match outer_type {
+    1 -> {
+      u8 inner_type
+      bytes inner[] match inner_type {
+        1 -> {
+          u8 size
+          bytes content[size]
+        }
+        _ -> {}
+      }
+    }
+    _ -> {}
+  }
+}
