@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, FillToSize, SizeExpr,
     Endianness,
 )
 
@@ -378,6 +378,13 @@ class Encoder:
         if isinstance(size, SizeExpr):
             return self._eval_size_expr(size, context)
 
+        if isinstance(size, FillToSize):
+            # Fill to minimum size - pad until total message reaches target size
+            consumed_bytes = context.get('__consumed_bytes__', 0)
+            needed_bytes = size.target_size - consumed_bytes
+            # Return 0 if we've already reached or exceeded the target size
+            return max(0, needed_bytes)
+
         return None
 
     def _eval_size_expr(self, expr: SizeExpr, context: dict) -> int | None:
@@ -451,6 +458,7 @@ class Encoder:
         # Use list to store encoded values by index (handles duplicate field names)
         encoded_fields = [None] * len(fields)
         field_lengths = {}  # field_name -> byte length (for size references)
+        field_lengths['__consumed_bytes__'] = 0  # Track total consumed bytes for fill_to
 
         # First pass: encode input fields and fixed fields (except length fields)
         for i, f in enumerate(fields):
@@ -459,6 +467,7 @@ class Encoder:
                 if isinstance(f.size, LiteralSize):
                     encoded = self.encode_field(f, None, field_lengths)
                     encoded_fields[i] = encoded
+                    field_lengths['__consumed_bytes__'] += len(encoded) // 2
             elif f.default_value is not None and f.name not in category.length_fields:
                 # Fixed field with default value
                 value = f.default_value
@@ -469,6 +478,7 @@ class Encoder:
                 encoded = self.encode_field(f, value, field_lengths)
                 encoded_fields[i] = encoded
                 field_lengths[f.name] = len(encoded) // 2
+                field_lengths['__consumed_bytes__'] += len(encoded) // 2
             elif f.name in category.input_fields:
                 # Input field
                 if f.name not in input_values:
@@ -477,6 +487,7 @@ class Encoder:
                 encoded = self.encode_field(f, value, field_lengths)
                 encoded_fields[i] = encoded
                 field_lengths[f.name] = len(encoded) // 2
+                field_lengths['__consumed_bytes__'] += len(encoded) // 2
 
         # Second pass: calculate length fields based on encoded field sizes
         for i, f in enumerate(fields):
@@ -506,12 +517,14 @@ class Encoder:
                 encoded = self.encode_field(f, target_length, field_lengths)
                 encoded_fields[i] = encoded
                 field_lengths[f.name] = len(encoded) // 2
+                field_lengths['__consumed_bytes__'] += len(encoded) // 2
 
         # Third pass: encode any remaining padding fields that depend on field refs
         for i, f in enumerate(fields):
             if encoded_fields[i] is None and isinstance(f.type, PadType):
                 encoded = self.encode_field(f, None, field_lengths)
                 encoded_fields[i] = encoded
+                field_lengths['__consumed_bytes__'] += len(encoded) // 2
 
         # Build final message in field order
         result = ""

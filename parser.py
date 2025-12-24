@@ -10,7 +10,7 @@ from coco_ast import (
     CocoFile, Constant, EnumDef, EnumMember, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef, MessageTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize,
     EnumValue, FieldAttributes, DisplayFormat,
     MatchClause, MatchBranch,
     ValueOverride, StructureOverride,
@@ -176,7 +176,7 @@ class CocoTransformer(Transformer):
         if first == "bytes":
             size = None
             for item in items[1:]:
-                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                     size = item
             return (BytesType(), size)
 
@@ -187,7 +187,7 @@ class CocoTransformer(Transformer):
             for item in items[1:]:
                 if item == "cstr":
                     is_cstr = True
-                elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+                elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                     size = item
             return (StringType(is_cstr=is_cstr), size)
 
@@ -195,7 +195,7 @@ class CocoTransformer(Transformer):
         if first == "pad":
             size = None
             for item in items[1:]:
-                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+                if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                     size = item
             return (PadType(), size)
 
@@ -215,7 +215,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[2:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -274,6 +274,11 @@ class CocoTransformer(Transformer):
         """Handle field reference: IDENT or IDENT.IDENT.IDENT..."""
         return [str(item) for item in items]
 
+    def fill_to_size(self, items):
+        """Transform fill_to: N into FillToSize(target_size=N)"""
+        target_size = int(items[0])
+        return FillToSize(target_size=target_size)
+
     def size_value(self, items):
         if len(items) == 0:
             return VariableSize()
@@ -281,6 +286,9 @@ class CocoTransformer(Transformer):
         # Handle greedy size: [...] (GREEDY_SIZE token)
         if isinstance(val, Token) and (val.type == 'GREEDY_SIZE' or str(val) == "..."):
             return GreedySize()
+        # Handle fill_to size (already transformed by fill_to_size method)
+        if isinstance(val, FillToSize):
+            return val
         # If it's already a SizeSpec (from expression), return it
         if isinstance(val, (LiteralSize, FieldRefSize, SizeExpr)):
             return val
@@ -441,7 +449,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -480,7 +488,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -511,7 +519,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
@@ -583,7 +591,7 @@ class CocoTransformer(Transformer):
         attrs = None
 
         for item in items[2:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize)):
+            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item

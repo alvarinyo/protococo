@@ -156,6 +156,16 @@ class SizeExpr:
 
 
 @dataclass
+class FillToSize:
+    """Fill to minimum size: [fill_to: N]
+
+    Consumes bytes until the total message size reaches N bytes.
+    Used for protocols with minimum frame/message sizes (e.g., Ethernet 60-byte minimum).
+    """
+    target_size: int
+
+
+@dataclass
 class BranchDeterminedSize:
     """Size determined by matched branch: [*]
 
@@ -165,7 +175,7 @@ class BranchDeterminedSize:
     pass
 
 
-SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | BranchDeterminedSize | None
+SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | FillToSize | BranchDeterminedSize | None
 
 
 # === Values ===

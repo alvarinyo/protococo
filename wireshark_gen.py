@@ -7,7 +7,7 @@ Generates Wireshark Lua dissector code from .coco protocol definitions.
 from coco_ast import (
     CocoFile, Message, Field, EnumDef,
     IntegerType, BytesType, StringType, PadType, BitFieldType, EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, FillToSize, SizeExpr,
     MatchClause, EnumValue,
 )
 
@@ -374,6 +374,17 @@ class LuaGenerator:
                         'skip_registration': True,
                     })
 
+        elif isinstance(field_type, PadType):
+            # Padding field - show as bytes in Wireshark
+            self.proto_fields.append({
+                'var_name': var_name,
+                'field_name': field.name,
+                'field_path': field_path,
+                'definition': f"local {var_name} = ProtoField.bytes(\"{proto_name}.{field_path}\", \"{field.name} (padding)\")",
+                'size': field.size,
+                'type': 'padding',
+            })
+
     def _collect_proto_fields_stack(self, proto_name: str, fields: list[Field], prefix: str, all_layers: list[Message]):
         """Collect ProtoField definitions for stack mode (don't recurse into layer messages)."""
         layer_names = {msg.name for msg in all_layers}
@@ -474,6 +485,9 @@ class LuaGenerator:
         elif isinstance(size, GreedySize):
             # Greedy size - consume rest of buffer (-1 means "to end" in Wireshark)
             return "-1"
+        elif isinstance(size, FillToSize):
+            # Fill to minimum size - pad until total message reaches target size
+            return f"math.max(0, {size.target_size} - offset)"
         elif isinstance(size, VariableSize):
             return "nil"
         return "nil"
@@ -640,6 +654,19 @@ class LuaGenerator:
                     self._emit(f"offset = offset + {size}")
                     self._emit("")
 
+            elif isinstance(field_type, PadType):
+                # Padding field
+                size_expr = self._size_to_lua(field.size) if field.size else "1"
+                self._emit(f"-- Padding: {field.name}")
+                self._emit(f"local {field.name}_len = {size_expr}")
+                self._emit(f"if {field.name}_len > 0 then")
+                self.indent += 1
+                self._emit(f"{tree_var}:add({var_name}, buffer(offset, {field.name}_len))")
+                self._emit(f"offset = offset + {field.name}_len")
+                self.indent -= 1
+                self._emit("end")
+                self._emit("")
+
     def _get_dissector_table_name(self, discriminator_path: str, proto_name: str) -> str:
         """Generate DissectorTable name from discriminator path."""
         # Common mappings
@@ -747,6 +774,19 @@ class LuaGenerator:
                         self._generate_field_parsing(embedded_fields, f"{field.name}_tree", f"{field_path}.", proto_name)
                         self._emit(f"{field.name}_tree:set_len(offset - {field.name}_start)")
                         self._emit("")
+
+            elif isinstance(field_type, PadType):
+                # Padding field
+                size_expr = self._size_to_lua(field.size) if field.size else "1"
+                self._emit(f"-- Padding: {field.name}")
+                self._emit(f"local {field.name}_len = {size_expr}")
+                self._emit(f"if {field.name}_len > 0 then")
+                self.indent += 1
+                self._emit(f"{tree_var}:add({var_name}, buffer(offset, {field.name}_len))")
+                self._emit(f"offset = offset + {field.name}_len")
+                self.indent -= 1
+                self._emit("end")
+                self._emit("")
 
     def _generate_structure_parsing(self, fields: list[Field], tree_var: str, buf_var: str, offset_var: str, prefix: str, proto_name: str):
         """Generate parsing for a structure body using a sub-buffer."""

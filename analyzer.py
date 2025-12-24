@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, BranchDeterminedSize,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize,
     EnumValue, MatchClause,
     Endianness,
 )
@@ -709,6 +709,14 @@ class Decoder:
             # 0 bytes is valid (nothing left to consume)
             return remaining_bytes
 
+        if isinstance(size, FillToSize):
+            # Fill to minimum size - consume bytes until total message size reaches target
+            consumed_bytes = context.get('__consumed_bytes__', 0)
+            needed_bytes = size.target_size - consumed_bytes
+            # Clamp to remaining_bytes (don't exceed what's available)
+            # 0 or negative means we've already reached/exceeded target size
+            return max(0, min(needed_bytes, remaining_bytes))
+
         if isinstance(size, VariableSize):
             # Variable size can't be determined without remaining_bytes context
             # Note: In new syntax, bare [] should have been converted to BranchDeterminedSize
@@ -1180,10 +1188,14 @@ class Decoder:
 
         for field in fields:
             remaining = hex_str[offset:]
-            # Allow empty remaining for GreedySize and BranchDeterminedSize
+            # Track consumed bytes for fill_to size calculation
+            context['__consumed_bytes__'] = offset // 2
+
+            # Allow empty remaining for GreedySize, FillToSize, and BranchDeterminedSize
             # (BranchDeterminedSize can consume 0 bytes for empty match branches)
             # (GreedySize consumes all remaining, including 0 bytes)
-            if not remaining and not isinstance(field.size, (GreedySize, BranchDeterminedSize)):
+            # (FillToSize can consume 0 bytes if target size already reached)
+            if not remaining and not isinstance(field.size, (GreedySize, FillToSize, BranchDeterminedSize)):
                 # Not enough bytes
                 results.append(DecodeResult(
                     name=field.name,

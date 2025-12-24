@@ -69,6 +69,7 @@ size_spec: "[" size_value "]"
 
 size_value: size_expr       // expression (includes simple values)
           | GREEDY_SIZE     // greedy size [...] - consumes all remaining
+          | "fill_to" ":" DEC_NUMBER  -> fill_to_size  // fill to minimum size [fill_to: N]
           |                 // empty = variable length (or branch-determined with match)
 
 GREEDY_SIZE.2: "..."  // Higher priority than operators

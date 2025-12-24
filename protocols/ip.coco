@@ -431,5 +431,5 @@ layer message ethernet_frame {
     EtherType.VLAN -> vlan_frame vlan
     _ -> {}
   }
-  pad[...]  // Ethernet padding for minimum frame size
+  pad[fill_to: 60]  // Fill to Ethernet minimum frame size (60 bytes without FCS)
 }
