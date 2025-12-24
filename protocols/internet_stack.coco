@@ -1,0 +1,15 @@
+version 1.0
+endian be
+
+// Internet Protocol Stack - Complete network stack from Ethernet to Application layer
+// This file provides all protocols needed for parsing network packet captures (PCAPs)
+
+include "ethernet.coco"
+
+// All protocol layers are now loaded:
+// - Link Layer: Ethernet, VLAN, ARP
+// - Network Layer: IPv4, IPv6, ICMP/ICMPv6
+// - Transport Layer: TCP, UDP
+// - Application Layer: DNS
+//
+// Use this file with: --cocofile=protocols/internet_stack.coco

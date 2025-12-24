@@ -1,0 +1,77 @@
+version 1.0
+endian be
+
+// ============================================================================
+// TCP Protocol (RFC 793)
+// ============================================================================
+
+// TCP option kinds (RFC 793, 1323, 2018, 7323)
+enum TcpOptKind : u8 {
+  END = 0,
+  NOP = 1,
+  MSS = 2,
+  WINDOW_SCALE = 3,
+  SACK_PERMITTED = 4,
+  SACK = 5,
+  TIMESTAMPS = 8
+}
+
+// TCP option using match with [] for branch-determined size
+// Each branch has different structure and size - replaces inheritance
+message tcp_option {
+  TcpOptKind kind
+  bytes rest[] match kind {
+    TcpOptKind.NOP -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.END -> {}           // 0 bytes - total option is 1 byte
+    TcpOptKind.MSS -> {
+      u8 length = 0x04
+      u16 mss
+    }
+    TcpOptKind.WINDOW_SCALE -> {
+      u8 length = 0x03
+      u8 shift_count
+    }
+    TcpOptKind.SACK_PERMITTED -> {
+      u8 length = 0x02
+    }
+    TcpOptKind.TIMESTAMPS -> {
+      u8 length = 0x0A
+      u32 ts_val
+      u32 ts_ecr
+    }
+    _ -> {
+      // Unknown option - uses size-from-match for data
+      u8 length
+      bytes data[length - 2]
+    }
+  }
+}
+
+// TCP segment (RFC 793)
+// Bytes 12-13 contain data_offset (4b) + reserved (4b) + flags (8b) = 16 bits
+layer message tcp_segment {
+  u16 src_port [display: port]
+  u16 dst_port [display: port]
+  u32 seq_num
+  u32 ack_num
+  bits[16] data_offset_flags {
+    // Flags (low 8 bits) - bit 0 is fin, bit 7 is cwr
+    bit fin
+    bit syn
+    bit rst
+    bit psh
+    bit ack
+    bit urg
+    bit ece
+    bit cwr
+    // Reserved and data offset (high 8 bits)
+    bits[4] reserved
+    bits[4] data_offset
+  }
+  u16 window
+  u16 checksum
+  u16 urgent_ptr
+  // Options parsed as polymorphic array - tries all tcp_option subtypes
+  tcp_option options[data_offset_flags.data_offset * 4 - 20]
+  bytes data[...]  // Payload - size determined by enclosing layer boundary
+}

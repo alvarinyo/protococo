@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test: IPv6 + TCP packet from real pcap
 
-COMMAND="./scripts/pcap2hex.sh tests/pcaps/ipv6_icmpv6.pcap 46 | python3 protococo.py find --cocofile=protocols/ip.coco --dissect"
+COMMAND="./scripts/pcap2hex.sh tests/pcaps/ipv6_icmpv6.pcap 46 | python3 protococo.py find --cocofile=protocols/internet_stack.coco --dissect"
 EXPECTED_EXIT=0
 EXPECTED_OUTPUT="tests/golden/pcap/fixtures/ipv6_tcp.expected"

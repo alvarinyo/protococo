@@ -1,0 +1,44 @@
+version 1.0
+endian be
+
+include "ip_common.coco"
+include "tcp.coco"
+include "udp.coco"
+include "icmp.coco"
+
+// ============================================================================
+// IPv4 (RFC 791)
+// ============================================================================
+
+// IPv4 header (20 bytes minimum, no options)
+message ipv4_header {
+  bits[8] version_ihl {
+    bits[4] ihl
+    bits[4] version
+  }
+  u8 dscp_ecn
+  u16 total_length
+  u16 identification
+  bits[16] flags_fragment {
+    bits[13] fragment_offset
+    bit more_fragments      // MF flag
+    bit dont_fragment       // DF flag
+    bit reserved
+  }
+  u8 ttl
+  Protocol protocol
+  u16 header_checksum
+  u32 src_ip [display: ipv4]
+  u32 dst_ip [display: ipv4]
+}
+
+// IPv4 packet with polymorphic payload based on protocol field
+layer message ipv4_packet {
+  ipv4_header header
+  bytes payload[header.total_length - 20] match header.protocol {
+    Protocol.TCP -> tcp_segment tcp
+    Protocol.UDP -> udp_datagram udp
+    Protocol.ICMP -> icmp_message icmp
+    _ -> {}
+  }
+}

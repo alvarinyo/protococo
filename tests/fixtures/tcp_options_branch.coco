@@ -46,5 +46,5 @@ message tcp_option {
 
 // Test array of options
 message tcp_options_array {
-  tcp_option options[...]  // Greedy - consumes all remaining
+  tcp_option options[...]  // Size determined by data_offset field
 }

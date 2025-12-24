@@ -1,0 +1,55 @@
+version 1.0
+endian be
+
+include "ipv4.coco"
+include "ipv6.coco"
+include "arp.coco"
+
+// ============================================================================
+// Ethernet (IEEE 802.3)
+// ============================================================================
+
+// EtherType values (IEEE 802.3)
+enum EtherType : u16 {
+  IPV4 = 0x0800,
+  ARP = 0x0806,
+  VLAN = 0x8100,
+  IPV6 = 0x86DD
+}
+
+// Ethernet header (14 bytes)
+message ethernet_header {
+  bytes dst_mac[6] [display: mac]
+  bytes src_mac[6] [display: mac]
+  EtherType ethertype
+}
+
+// 802.1Q VLAN frame (tag + inner payload)
+layer message vlan_frame {
+  bits[16] tci {
+    bits[12] vlan_id
+    bit dei               // Drop Eligible Indicator
+    bits[3] pcp           // Priority Code Point
+  }
+  EtherType inner_ethertype
+  bytes inner[] match inner_ethertype {
+    EtherType.IPV4 -> ipv4_packet ip
+    EtherType.IPV6 -> ipv6_packet ip6
+    EtherType.ARP -> arp_packet arp
+    _ -> {}
+  }
+}
+
+// Ethernet frame with polymorphic payload based on ethertype
+// Note: Ethernet has 64-byte minimum frame size (60 without FCS), so padding may be present
+layer message ethernet_frame {
+  ethernet_header eth
+  bytes payload[] match eth.ethertype {
+    EtherType.IPV4 -> ipv4_packet ip
+    EtherType.IPV6 -> ipv6_packet ip6
+    EtherType.ARP -> arp_packet arp
+    EtherType.VLAN -> vlan_frame vlan
+    _ -> {}
+  }
+  pad[fill_to: 60]  // Fill to Ethernet minimum frame size (60 bytes without FCS)
+}

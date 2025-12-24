@@ -1,0 +1,29 @@
+version 1.0
+endian be
+
+// ============================================================================
+// ICMP Protocol (RFC 792)
+// ============================================================================
+
+// ICMP message types
+enum IcmpType : u8 {
+  ECHO_REPLY = 0,
+  DEST_UNREACHABLE = 3,
+  SOURCE_QUENCH = 4,
+  REDIRECT = 5,
+  ECHO_REQUEST = 8,
+  TIME_EXCEEDED = 11,
+  PARAMETER_PROBLEM = 12,
+  TIMESTAMP_REQUEST = 13,
+  TIMESTAMP_REPLY = 14
+}
+
+// ICMP message (RFC 792)
+layer message icmp_message {
+  IcmpType icmp_type
+  u8 code
+  u16 checksum
+  u16 identifier
+  u16 sequence
+  bytes data[...]        // Data (variable length)
+}

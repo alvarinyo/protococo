@@ -1,0 +1,12 @@
+version 1.0
+endian be
+
+// Common types shared across multiple protocols
+
+// IP Protocol/Next Header numbers (shared by IPv4 and IPv6)
+enum Protocol : u8 {
+  ICMP = 1,
+  TCP = 6,
+  UDP = 17,
+  ICMPV6 = 58
+}

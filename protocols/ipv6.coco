@@ -1,0 +1,36 @@
+version 1.0
+endian be
+
+include "ip_common.coco"
+include "tcp.coco"
+include "udp.coco"
+include "icmp.coco"
+
+// ============================================================================
+// IPv6 (RFC 8200)
+// ============================================================================
+
+// IPv6 header (40 bytes fixed, no options in base header)
+message ipv6_header {
+  bits[32] version_tc_flow {
+    bits[20] flow_label
+    bits[8] traffic_class
+    bits[4] version           // Always 6
+  }
+  u16 payload_length
+  Protocol next_header        // Same as IPv4 protocol field
+  u8 hop_limit
+  bytes src_ip[16] [display: ipv6]
+  bytes dst_ip[16] [display: ipv6]
+}
+
+// IPv6 packet with polymorphic payload based on next_header field
+layer message ipv6_packet {
+  ipv6_header header
+  bytes payload[header.payload_length] match header.next_header {
+    Protocol.TCP -> tcp_segment tcp
+    Protocol.UDP -> udp_datagram udp
+    Protocol.ICMPV6 -> icmp_message icmpv6
+    _ -> {}
+  }
+}

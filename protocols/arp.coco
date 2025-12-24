@@ -1,0 +1,25 @@
+version 1.0
+endian be
+
+// ============================================================================
+// ARP (RFC 826)
+// ============================================================================
+
+// ARP operation codes
+enum ArpOp : u16 {
+  REQUEST = 1,
+  REPLY = 2
+}
+
+// ARP packet for IPv4 over Ethernet
+layer message arp_packet {
+  u16 hw_type           // 1 = Ethernet
+  u16 proto_type        // 0x0800 = IPv4
+  u8 hw_len             // 6 for Ethernet
+  u8 proto_len          // 4 for IPv4
+  ArpOp operation
+  bytes sender_mac[6] [display: mac]
+  u32 sender_ip [display: ipv4]
+  bytes target_mac[6] [display: mac]
+  u32 target_ip [display: ipv4]
+}
