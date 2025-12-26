@@ -134,7 +134,7 @@ message dns_name {
 // Domain name is a sequence of labels ending with 0x00 terminator
 // Example: "google.com" = 06 67 6f 6f 67 6c 65 03 63 6f 6d 00
 message dns_question {
-  dns_name qname
+  dns_name qname [display: dnsname]
   DnsQType qtype
   DnsQClass qclass
 }
@@ -142,12 +142,33 @@ message dns_question {
 // DNS resource record (answer, authority, additional)
 // Name can be either a label sequence OR a compression pointer
 message dns_rr {
-  dns_name name              // Handles both pointer and normal names
+  dns_name name [display: dnsname]             // Handles both pointer and normal names
   DnsQType rr_type
   DnsQClass rr_class
   u32 ttl
   u16 rd_length
-  bytes rdata[rd_length]     // Resource data (format depends on rr_type)
+  bytes rdata[rd_length] match rr_type {
+    DnsQType.A -> {
+      u32 address4 [display: ipv4]
+    }
+    DnsQType.AAAA -> {
+      bytes address6[16] [display: ipv6]
+    }
+    DnsQType.MX -> {
+      u16 preference
+      dns_name exchange [display: dnsname]
+    }
+    DnsQType.CNAME -> {
+      dns_name cname [display: dnsname]
+    }
+    DnsQType.NS -> {
+      dns_name nsname [display: dnsname]
+    }
+    DnsQType.PTR -> {
+      dns_name ptrname [display: dnsname]
+    }
+    _ -> {}
+  }
 }
 
 // Complete DNS message (query or response)

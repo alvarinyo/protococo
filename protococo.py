@@ -38,7 +38,7 @@ Options:
   --tree                    Display dissected fields as a tree structure.
   --layer-colors            Color tree background by protocol layer depth (requires --tree).
   -L <n>, --field-bytes-limit=<n>
-                            Truncate long field values to N bytes in output [default: 8].
+                            Truncate long field values to N bytes in output [default: 32].
                                 Use 0 for unlimited.
 
 """
@@ -47,6 +47,7 @@ __version__ = "0.3.0"
 
 from pprint import *
 from collections import OrderedDict
+from typing import Any
 import re
 import os
 import sys
@@ -56,7 +57,7 @@ from docopt import docopt
 from parser import parse, ParseError
 from analyzer import Decoder, ValidationResult, DecodeResult, FieldValue
 from encoder import Encoder
-from coco_ast import EnumTypeRef
+from coco_ast import EnumTypeRef, BranchDeterminedSize
 import formatters
 
 
@@ -111,8 +112,15 @@ def collect_field_metadata(decoder: Decoder, msg, prefix: str = "") -> dict:
     def collect_from_fields(fields_list: list, field_prefix: str):
         """Helper to collect metadata from a list of fields."""
         for field in fields_list:
+            # Check if this field should be flattened (BranchDeterminedSize [])
+            is_flattened = isinstance(field.size, BranchDeterminedSize)
+            
             field_key = f"{field_prefix}{field.name}" if field_prefix else field.name
             metadata[field_key] = field
+
+            # If flattened, children use the same prefix as this field
+            # Otherwise, children use this field's name as prefix
+            nested_prefix = field_prefix if is_flattened else f"{field_key}."
 
             # Check for embedded message
             if isinstance(field.type, EnumTypeRef):
@@ -121,21 +129,21 @@ def collect_field_metadata(decoder: Decoder, msg, prefix: str = "") -> dict:
                     # Recursively collect from embedded message
                     if field.structure_body:
                         # Use overridden structure
-                        collect_from_fields(field.structure_body, f"{field_key}.")
+                        collect_from_fields(field.structure_body, nested_prefix)
                     else:
                         # Use original message fields
-                        nested = collect_field_metadata(decoder, embedded_msg, f"{field_key}.")
+                        nested = collect_field_metadata(decoder, embedded_msg, nested_prefix)
                         metadata.update(nested)
 
             # Check for structure body (structure override on bytes field)
             if field.structure_body and not isinstance(field.type, EnumTypeRef):
-                collect_from_fields(field.structure_body, f"{field_key}.")
+                collect_from_fields(field.structure_body, nested_prefix)
 
             # Check for match clause - traverse all branches
             if field.match_clause:
                 for branch in field.match_clause.branches:
                     if branch.fields:
-                        collect_from_fields(branch.fields, f"{field_key}.")
+                        collect_from_fields(branch.fields, nested_prefix)
 
     collect_from_fields(fields, prefix)
     return metadata
@@ -200,7 +208,7 @@ def field_matches_filter(field_name: str, field_path: str, filter_fields: list) 
     return False
 
 
-def validation_result_to_tuple(result: ValidationResult):
+def validation_result_to_tuple(result: ValidationResult, fields_metadata: dict = None, coco_file = None, decode: bool = False):
     """Convert new ValidationResult to old 5-tuple format for display functions.
 
     Old format:
@@ -224,19 +232,72 @@ def validation_result_to_tuple(result: ValidationResult):
             return v.val
         return v
 
-    def dict_to_plain(d: dict) -> dict:
-        """Convert a dict with FieldValue objects to a plain dict with just values."""
+    def dict_to_plain(d: dict, parent_path: str = "") -> dict:
+        """Convert a dict with FieldValue objects to a plain dict with just values, formatted for display."""
         result = {}
         for k, v in d.items():
+            field_path = f"{parent_path}.{k}" if parent_path else k
+            # Strip array indices from field_path for metadata lookup
+            # e.g., "questions[0].qname" -> "questions.qname"
+            field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
             actual_val = extract_val(v)
+            hex_val = v.hex if isinstance(v, FieldValue) else ""
+            
+            # Check if this field is flattened (BranchDeterminedSize [])
+            metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
+            is_flattened = isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
+
+            # Check if this structured field has a display formatter
+            if decode and metadata:
+                if metadata.attributes and metadata.attributes.display:
+                    fmt_name = metadata.attributes.display.name
+                    formatted = formatters.format_value(fmt_name, hex_val)
+                    if formatted:
+                        result[k] = formatted
+                        continue
+
             if isinstance(actual_val, dict):
-                result[k] = dict_to_plain(actual_val)
+                # If flattened, children use the same prefix as this field's parent
+                child_parent_path = parent_path if is_flattened else field_path
+                result[k] = dict_to_plain(actual_val, child_parent_path)
             elif isinstance(actual_val, list):
-                result[k] = [extract_val(item) if not isinstance(extract_val(item), dict)
-                            else dict_to_plain(extract_val(item)) for item in actual_val]
+                result[k] = [
+                    dict_to_plain(extract_val(item), f"{field_path}[{i}]") if isinstance(extract_val(item), dict)
+                    else format_val(f"{field_path}[{i}]", extract_val(item).hex if isinstance(extract_val(item), FieldValue) else "", extract_val(item))
+                    for i, item in enumerate(actual_val)
+                ]
             else:
-                result[k] = actual_val
+                result[k] = format_val(field_path, hex_val, actual_val)
         return result
+
+    def format_val(field_path: str, hex_val: str, decoded_val: Any) -> str:
+        """Format a value using display formatters and enum lookups."""
+        if not decode:
+            return str(decoded_val)
+        
+        # Try display formatter from metadata
+        if fields_metadata:
+            # Strip array indices from field_path for metadata lookup
+            field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+            metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path)
+            if metadata and metadata.attributes and metadata.attributes.display:
+                fmt_name = metadata.attributes.display.name
+                formatted = formatters.format_value(fmt_name, hex_val)
+                if formatted:
+                    return formatted
+        
+        # Try enum formatting
+        if coco_file and isinstance(decoded_val, str) and "." in decoded_val and not decoded_val.startswith("0x"):
+            parts = decoded_val.split(".", 1)
+            if len(parts) == 2:
+                enum_name, member_name = parts
+                enum_def = coco_file.get_enum(enum_name)
+                if enum_def:
+                    member = enum_def.get_member_by_name(member_name)
+                    if member:
+                        return f"{member.value} ({decoded_val})"
+        
+        return str(decoded_val)
 
     def flatten_to_decoded(d: dict, parent_path: str):
         """Recursively flatten nested dict into validation_decoded_dict for filtering."""
@@ -244,6 +305,20 @@ def validation_result_to_tuple(result: ValidationResult):
             field_path = f"{parent_path}.{k}"
             # Extract value from FieldValue if present
             actual_val = extract_val(v)
+            hex_val = v.hex if isinstance(v, FieldValue) else ""
+            
+            # Check if this structured field has a display formatter
+            if decode and fields_metadata:
+                # Strip array indices from field_path for metadata lookup
+                field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+                metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path)
+                if metadata and metadata.attributes and metadata.attributes.display:
+                    fmt_name = metadata.attributes.display.name
+                    formatted = formatters.format_value(fmt_name, hex_val)
+                    if formatted:
+                        validation_decoded_dict[field_path] = formatted
+                        continue
+
             if isinstance(actual_val, dict):
                 flatten_to_decoded(actual_val, field_path)
             elif isinstance(actual_val, list):
@@ -251,7 +326,7 @@ def validation_result_to_tuple(result: ValidationResult):
                 converted_list = [extract_val(item) for item in actual_val]
                 validation_decoded_dict[field_path] = str(converted_list)
             else:
-                validation_decoded_dict[field_path] = str(actual_val)
+                validation_decoded_dict[field_path] = format_val(field_path, hex_val, actual_val)
 
     for field in result.fields:
         # Make field names unique if they appear multiple times
@@ -269,16 +344,22 @@ def validation_result_to_tuple(result: ValidationResult):
         if field.errors:
             validation_log_dict[unique_name] = field.errors
 
+        # Check if this field is flattened (BranchDeterminedSize [])
+        metadata = fields_metadata.get(field.name) if fields_metadata else None
+        is_flattened = isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
+
         if field.decoded_value is not None:
             if isinstance(field.decoded_value, dict):
+                # If flattened, children use the same prefix as this field's parent (empty here)
+                child_parent_path = "" if is_flattened else unique_name
                 # Flatten nested structure for path-based filtering
-                flatten_to_decoded(field.decoded_value, unique_name)
+                flatten_to_decoded(field.decoded_value, child_parent_path)
                 # Convert to plain dict (without FieldValue wrappers) for string representation
-                validation_decoded_dict[unique_name] = str(dict_to_plain(field.decoded_value))
+                validation_decoded_dict[unique_name] = str(dict_to_plain(field.decoded_value, child_parent_path))
             elif isinstance(field.decoded_value, str):
-                validation_decoded_dict[unique_name] = field.decoded_value
+                validation_decoded_dict[unique_name] = format_val(unique_name, field.hex_value, field.decoded_value)
             else:
-                validation_decoded_dict[unique_name] = str(field.decoded_value)
+                validation_decoded_dict[unique_name] = format_val(unique_name, field.hex_value, field.decoded_value)
 
     # Add remaining bytes as overflow field if present
     if result.remaining_bytes:
@@ -315,10 +396,11 @@ def get_message_explanation_string_compact(validation_result, filter_fields = No
             v_adj = validation_decoded_dict[k]
 
         # Apply field bytes limit truncation
-        # Only truncate hex values or simple decoded strings, not structured representations
+        # Only truncate hex values or long decoded strings, not structured or short formatted ones
         if field_bytes_limit > 0:
-            # Don't truncate structured decoded values (dicts, lists)
-            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+            if not is_decoded:
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+            elif not v_adj.startswith('{') and not v_adj.startswith('[') and len(v_adj) > 256:
                 v_adj = truncate_field_value(v_adj, field_bytes_limit)
 
         fail_color = AnsiColors.FAIL if odd == 1 else AnsiColors.FAIL2
@@ -368,10 +450,11 @@ def get_message_explanation_string_oneline(validation_result, filter_fields = No
             v_adj = validation_decoded_dict[k]
 
         # Apply field bytes limit truncation
-        # Only truncate hex values or simple decoded strings, not structured representations
+        # Only truncate hex values or long decoded strings, not structured or short formatted ones
         if field_bytes_limit > 0:
-            # Don't truncate structured decoded values (dicts, lists)
-            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+            if not is_decoded:
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+            elif not v_adj.startswith('{') and not v_adj.startswith('[') and len(v_adj) > 256:
                 v_adj = truncate_field_value(v_adj, field_bytes_limit)
 
         if not field_complies:
@@ -422,10 +505,11 @@ def get_message_explanation_string_multiline(validation_result, filter_fields = 
             v_adj = validation_decoded_dict[k]
 
         # Apply field bytes limit truncation
-        # Only truncate hex values or simple decoded strings, not structured representations
+        # Only truncate hex values or long decoded strings, not structured or short formatted ones
         if field_bytes_limit > 0:
-            # Don't truncate structured decoded values (dicts, lists)
-            if not is_decoded or (not v_adj.startswith('{') and not v_adj.startswith('[')):
+            if not is_decoded:
+                v_adj = truncate_field_value(v_adj, field_bytes_limit)
+            elif not v_adj.startswith('{') and not v_adj.startswith('[') and len(v_adj) > 256:
                 v_adj = truncate_field_value(v_adj, field_bytes_limit)
 
         if k_adj is None:
@@ -548,7 +632,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         # Use decoded value if available
         if decoded is not None:
             if isinstance(decoded, dict):
-                # Nested structure - will be handled recursively
+                # Nested structure - will be handled recursively, UNLESS we already formatted it
                 return None
             elif isinstance(decoded, str):
                 # Check if it's an enum value (don't truncate) or raw hex/text (truncate)
@@ -760,12 +844,20 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             if isinstance(actual_val, dict):
                 # Check if this field uses branch-determined size [*] and should be flattened
                 from coco_ast import BranchDeterminedSize
-                import re
                 # Strip array indices from field_path for metadata lookup
                 # e.g., "options[0].rest" -> "options.rest"
                 field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
                 metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k) if fields_metadata else None
                 is_branch_determined = metadata and isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
+
+                # Check if this structured field has a display formatter
+                if decode and metadata and metadata.attributes and metadata.attributes.display:
+                    fmt_name = metadata.attributes.display.name
+                    formatted = formatters.format_value(fmt_name, hex_val)
+                    if formatted:
+                        content = f"{k}: {AnsiColors.OKGREEN}{formatted}{AnsiColors.ENDC}"
+                        lines.append(f"{prefix}{connector}{format_line_content(content, current_layer_idx)}")
+                        continue
 
                 if is_branch_determined:
                     # Flatten: don't show field name, just show its contents at this level
@@ -816,7 +908,9 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
                     # Try to apply display formatter from metadata
                     if fields_metadata:
-                        metadata = fields_metadata.get(field_path) or fields_metadata.get(k)
+                        # Strip array indices from field_path for metadata lookup
+                        field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+                        metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
                         if metadata and metadata.attributes and metadata.attributes.display:
                             fmt_name = metadata.attributes.display.name
                             formatted = formatters.format_value(fmt_name, hex_val)
@@ -1553,7 +1647,10 @@ def cli_main():
                 fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
                 print(get_message_explanation_string_tree(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, protocol_chain=result.protocol_chain, layer_colors=args["--layer-colors"]))
             else:
-                validate_result = validation_result_to_tuple(result)
+                # Build field metadata for display formatters
+                msg = coco_file.get_message(args["<message_name>"])
+                fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                validate_result = validation_result_to_tuple(result, fields_metadata, coco_file, args["--decode"])
 
                 explanation_logs = None
                 if args["--verbose"] == True:
@@ -1570,7 +1667,9 @@ def cli_main():
             results = decoder.identify_message(message_hex_string)
 
             for i, result in enumerate(results):
-                validate_tuple = validation_result_to_tuple(result)
+                msg = coco_file.get_message(result.message_name)
+                fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                validate_tuple = validation_result_to_tuple(result, fields_metadata, coco_file, args["--decode"])
                 color = AnsiColors.BOLD + AnsiColors.OKGREEN if result.is_valid else AnsiColors.BOLD + AnsiColors.FAIL
 
                 filter_fields = [f.strip() for f in args["--dissect-fields"].split(",")] if args["--dissect-fields"] is not None else None

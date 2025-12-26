@@ -148,6 +148,43 @@ def format_ascii(hex_value: str, byte_count: int, endian: str) -> str:
         return hex_value
 
 
+@register("dnsname")
+def format_dnsname(hex_value: str, byte_count: int, endian: str) -> str:
+    """Format DNS name labels as dot-separated string."""
+    try:
+        raw_bytes = bytes.fromhex(hex_value)
+        labels = []
+        i = 0
+        while i < len(raw_bytes):
+            b = raw_bytes[i]
+            if b == 0:  # Terminator
+                break
+            if (b & 0xC0) == 0xC0:  # Compression pointer
+                if i + 1 < len(raw_bytes):
+                    offset = ((b & 0x3F) << 8) | raw_bytes[i+1]
+                    labels.append(f"[ptr:{offset}]")
+                    i += 2
+                else:
+                    labels.append("[err]")
+                    break
+                # Pointer ends the name
+                break
+            else:  # Normal label
+                length = b
+                if i + 1 + length <= len(raw_bytes):
+                    label = raw_bytes[i+1 : i+1+length].decode('ascii', errors='replace')
+                    labels.append(label)
+                    i += 1 + length
+                else:
+                    labels.append("[err]")
+                    break
+        
+        result = ".".join(labels)
+        return f'{hex_value} ("{result}")'
+    except Exception:
+        return hex_value
+
+
 # Well-known port names (common ports)
 _WELL_KNOWN_PORTS = {
     20: "ftp-data",
