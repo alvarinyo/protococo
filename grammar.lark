@@ -54,7 +54,7 @@ field_def: integer_type endian_suffix? IDENT default_value? match_clause? attrib
          | BYTES_KW IDENT size_spec? default_value? match_clause? attributes?  -> bytes_field
          | STRING_KW string_encoding? IDENT size_spec? default_value? match_clause? attributes?  -> string_field
          | PAD_KW size_spec? default_value? attributes?  -> pad_field
-         | bitfield_type IDENT bitfield_body? attributes?  -> bitfield
+         | bitfield_type IDENT bitfield_body? match_clause? attributes?  -> bitfield
          | IDENT IDENT size_spec? default_value? match_clause? attributes?  -> typed_field
 
 bitfield_body: "{" bitfield_member+ "}"

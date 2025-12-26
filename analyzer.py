@@ -184,6 +184,41 @@ class Decoder:
         self.coco_file = coco_file
         self.default_endian = coco_file.endian
         self._protocol_chain = []  # Tracks layer field names during decoding
+        self.data = b""            # Current message data
+        self.bit_offset = 0        # Current bit position
+
+    def _read_bits(self, n: int) -> int | None:
+        """Read n bits from current bit_offset and advance it."""
+        if n == 0:
+            return 0
+            
+        byte_idx = self.bit_offset // 8
+        bit_in_byte = self.bit_offset % 8
+        
+        # Check bounds
+        if byte_idx >= len(self.data):
+            return None
+            
+        # Read enough bytes to satisfy n bits
+        needed_bytes = (bit_in_byte + n + 7) // 8
+        if byte_idx + needed_bytes > len(self.data):
+            return None
+            
+        chunk = self.data[byte_idx : byte_idx + needed_bytes]
+        val = int.from_bytes(chunk, byteorder='big')
+        
+        # Shift and mask to get the desired bits (Big Endian packing)
+        total_bits_in_chunk = len(chunk) * 8
+        shift = total_bits_in_chunk - bit_in_byte - n
+        mask = (1 << n) - 1
+        result = (val >> shift) & mask
+        
+        self.bit_offset += n
+        return result
+
+    def _is_aligned(self) -> bool:
+        """Check if current bit_offset is byte-aligned."""
+        return self.bit_offset % 8 == 0
 
     def _is_layer_message(self, msg_name: str) -> bool:
         """Check if message or any of its bases is marked as layer."""
@@ -321,38 +356,42 @@ class Decoder:
 
         return result
 
-    def decode_integer(self, hex_str: str, int_type: IntegerType) -> tuple[int, bool]:
-        """Decode an integer from hex string."""
-        byte_size = int_type.byte_size
-        expected_hex_len = byte_size * 2
-
-        if len(hex_str) < expected_hex_len:
-            return 0, False
-
-        hex_value = hex_str[:expected_hex_len]
-
-        # Determine endianness
+    def decode_integer(self, int_type: IntegerType) -> tuple[int, bool]:
+        """Decode an integer from the current bit position."""
+        bit_size = int_type.bit_size
         endian = int_type.endian or self.default_endian
 
-        # Convert to bytes
-        try:
-            raw_bytes = bytes.fromhex(hex_value)
-        except ValueError:
-            return 0, False
-
-        # Decode based on endianness
         if endian == Endianness.LITTLE:
+            # For Little Endian, we read byte-by-byte and assemble
+            if bit_size % 8 != 0:
+                return 0, False  # LE usually implies byte alignment
+            
+            byte_count = bit_size // 8
+            raw_bytes = bytearray()
+            for _ in range(byte_count):
+                b = self._read_bits(8)
+                if b is None:
+                    return 0, False
+                raw_bytes.append(b)
             value = int.from_bytes(raw_bytes, byteorder='little', signed=int_type.is_signed)
+            return value, True
         else:
-            value = int.from_bytes(raw_bytes, byteorder='big', signed=int_type.is_signed)
+            # Big Endian (default for network bits)
+            value = self._read_bits(bit_size)
+            if value is None:
+                return 0, False
+            
+            # Handle signedness if needed (for BE)
+            if int_type.is_signed:
+                if value & (1 << (bit_size - 1)):
+                    value -= (1 << bit_size)
+            
+            return value, True
 
-        return value, True
-
-    def decode_field(self, hex_str: str, field: Field, context: dict) -> DecodeResult:
-        """Decode a single field from hex string.
+    def decode_field(self, field: Field, context: dict) -> DecodeResult:
+        """Decode a single field from the current bit position.
 
         Args:
-            hex_str: Hex string to decode from
             field: Field definition
             context: Dict of already-decoded field values (for size references)
 
@@ -361,9 +400,24 @@ class Decoder:
         """
         field_type = field.type
         errors = []
+        start_bit_offset = self.bit_offset
+
+        # --- Strict Alignment Validation ---
+        # u8, u16, bytes, string, pad, and enums are byte-oriented
+        is_byte_oriented = isinstance(field_type, (IntegerType, BytesType, StringType, PadType, EnumTypeRef))
+        
+        if is_byte_oriented and not self._is_aligned():
+            errors.append(f"Alignment Error: Field '{field.name}' ({field_type}) must be byte-aligned. Current bit offset: {self.bit_offset}")
+            return DecodeResult(
+                name=field.name,
+                hex_value="",
+                decoded_value=None,
+                is_valid=False,
+                errors=errors
+            )
 
         # Special handling for branch-determined size [*]
-        # The match clause determines the size by consuming bytes
+        # The match clause determines the size by consuming bits
         if isinstance(field.size, BranchDeterminedSize):
             if not field.match_clause:
                 return DecodeResult(
@@ -373,9 +427,16 @@ class Decoder:
                     is_valid=False,
                     errors=["Branch-determined size [*] requires a match clause"]
                 )
-            # Decode match clause and let it determine how many bytes to consume
-            decoded_value, consumed_hex = self._decode_match_consuming(hex_str, field.match_clause, context)
-            hex_value = hex_str[:consumed_hex]
+            # Decode match clause and let it determine how many bits to consume
+            decoded_value = self._decode_match(field.match_clause, context)
+            end_bit_offset = self.bit_offset
+            consumed_bits = end_bit_offset - start_bit_offset
+            
+            # Extract hex value for display
+            byte_start = start_bit_offset // 8
+            byte_end = (end_bit_offset + 7) // 8
+            hex_value = self.data[byte_start:byte_end].hex()
+            
             return DecodeResult(
                 name=field.name,
                 hex_value=hex_value,
@@ -384,78 +445,12 @@ class Decoder:
                 errors=[]
             )
 
-        # Special handling for until-based size - scan for terminator
-        if isinstance(field.size, UntilSize):
-            try:
-                # Evaluate the terminator value
-                term_val = field.size.terminator
-                if isinstance(term_val, EnumValue):
-                    # Look up enum value
-                    enum_def = self.get_enum(term_val.enum_name)
-                    if enum_def:
-                        member = next((m for m in enum_def.members if m.name == term_val.member_name), None)
-                        if member:
-                            terminator_value = member.value
-                        else:
-                            return DecodeResult(
-                                name=field.name,
-                                hex_value="",
-                                decoded_value=None,
-                                is_valid=False,
-                                errors=[f"Unknown enum member: {term_val.enum_name}.{term_val.member_name}"]
-                            )
-                    else:
-                        return DecodeResult(
-                            name=field.name,
-                            hex_value="",
-                            decoded_value=None,
-                            is_valid=False,
-                            errors=[f"Unknown enum: {term_val.enum_name}"]
-                        )
-                elif isinstance(term_val, int):
-                    terminator_value = term_val
-                else:
-                    return DecodeResult(
-                        name=field.name,
-                        hex_value="",
-                        decoded_value=None,
-                        is_valid=False,
-                        errors=[f"Unsupported terminator type: {type(term_val)}"]
-                    )
-
-                # Convert hex string to bytes for scanning
-                raw_bytes = bytes.fromhex(hex_str)
-
-                # Search for terminator byte
-                terminator_byte = int(terminator_value) & 0xFF
-                term_idx = raw_bytes.find(terminator_byte.to_bytes(1, 'big'))
-
-                if term_idx >= 0:
-                    # Found terminator - size includes the terminator
-                    size_bytes = term_idx + 1
-                else:
-                    # Terminator not found
-                    return DecodeResult(
-                        name=field.name,
-                        hex_value=hex_str,
-                        decoded_value=None,
-                        is_valid=False,
-                        errors=[f"Terminator 0x{terminator_byte:02X} not found in remaining {len(raw_bytes)} bytes"]
-                    )
-            except (ValueError, TypeError) as e:
-                return DecodeResult(
-                    name=field.name,
-                    hex_value="",
-                    decoded_value=None,
-                    is_valid=False,
-                    errors=[f"Error scanning for terminator: {str(e)}"]
-                )
-        else:
-            # Determine field size normally
-            size_bytes = self._get_field_size(field, context, len(hex_str) // 2)
+        # Determine field size (usually in bits for bit-stream)
+        # Note: _get_field_size needs refactor to return bits
+        size_bytes = self._get_field_size(field, context, (len(self.data) * 8 - self.bit_offset) // 8)
 
         # Check if size was determined
-        if size_bytes is None:
+        if size_bytes is None and not isinstance(field.size, (VariableSize, GreedySize)):
             return DecodeResult(
                 name=field.name,
                 hex_value="",
@@ -464,37 +459,23 @@ class Decoder:
                 errors=["Could not determine field size"]
             )
 
-        # Special handling for cstr with variable size - find null terminator
-        if (isinstance(field_type, StringType) and field_type.is_cstr and
-                isinstance(field.size, VariableSize)):
-            # Search for null byte in remaining hex
-            try:
-                raw_bytes = bytes.fromhex(hex_str)
-                null_idx = raw_bytes.find(b'\x00')
-                if null_idx >= 0:
-                    size_bytes = null_idx + 1  # Include the null byte
-                # If no null found, consume all remaining (original behavior)
-            except ValueError:
-                pass
+        # TODO: Handle UntilSize and VariableString with bit-precision
+        # For now, we continue with byte-based sizing for complex types
+        
+        size_bits = (size_bytes * 8) if size_bytes is not None else (len(self.data) * 8 - self.bit_offset)
+        
+        # Capture hex value before consuming
+        byte_start = self.bit_offset // 8
+        byte_end = (self.bit_offset + size_bits + 7) // 8
+        hex_value = self.data[byte_start:byte_end].hex()
 
-        hex_len = size_bytes * 2
-        if len(hex_str) < hex_len:
-            return DecodeResult(
-                name=field.name,
-                hex_value=hex_str,
-                decoded_value=None,
-                is_valid=False,
-                errors=[f"Not enough bytes: need {size_bytes}, have {len(hex_str) // 2}"]
-            )
-
-        hex_value = hex_str[:hex_len]
         decoded_value = None
         is_valid = True
         expected_hex = None
 
         # Decode based on type
         if isinstance(field_type, IntegerType):
-            decoded_value, ok = self.decode_integer(hex_value, field_type)
+            decoded_value, ok = self.decode_integer(field_type)
             if not ok:
                 is_valid = False
                 errors.append("Failed to decode integer")
@@ -510,40 +491,45 @@ class Decoder:
                         is_valid = False
                         errors.append(f"Value {decoded_value} not in enum {enum_def.name}")
 
+        elif isinstance(field_type, BitFieldType):
+            # bits[N] reads N bits and decodes them into a dict
+            bit_count = field_type.bit_count
+            int_val = self._read_bits(bit_count)
+            if int_val is None:
+                is_valid = False
+                errors.append(f"Not enough bits for bitfield: need {bit_count}")
+            else:
+                decoded_value = self._decode_bitfield(int_val, field, (bit_count + 7) // 8)
+
         elif isinstance(field_type, EnumTypeRef):
             # Could be enum field, message array, or single embedded message
             enum_def = self.get_enum(field_type.enum_name)
             msg_def = self.coco_file.get_message(field_type.enum_name)
 
             if msg_def and field.size is not None:
-                # Message array - decode as array of messages
-                decoded_value, consumed_bytes = self._decode_message_array(hex_value, msg_def, field, context)
-                # Update hex_value to only include consumed bytes
-                hex_value = hex_value[:consumed_bytes * 2]
+                # Message array
+                decoded_value, consumed_bits = self._decode_message_array(msg_def, field, context)
+                # hex_value already captures enough, but let's be precise
+                hex_value = self.data[byte_start : (start_bit_offset + consumed_bits + 7) // 8].hex()
             elif msg_def and field.size is None:
                 # Single embedded message
-                # Track layer in protocol chain
                 if self._is_layer_message(msg_def.name):
                     self._protocol_chain.append(field.name)
+                
                 if field.structure_body:
-                    # Use overridden structure instead of message definition
                     decoded_value, structure_valid = self._decode_structure(
-                        hex_value, field.structure_body, context, track_validity=True
+                        field.structure_body, context, track_validity=True
                     )
                     if not structure_valid:
                         is_valid = False
-                    consumed_bytes = sum(
-                        self._get_field_size(f, context, len(hex_value) // 2) or 0
-                        for f in field.structure_body
-                    )
                 else:
-                    decoded_value, consumed_bytes = self._decode_embedded_message(hex_value, msg_def, context)
-                # Update hex_value to only include consumed bytes
-                hex_value = hex_value[:consumed_bytes * 2]
+                    decoded_value, consumed_bits = self._decode_embedded_message(msg_def, context)
+                
+                hex_value = self.data[byte_start : (self.bit_offset + 7) // 8].hex()
             elif enum_def:
-                # Enum field - decode as integer using enum's base type
+                # Enum field
                 base_type = IntegerType(base=enum_def.base_type)
-                int_val, ok = self.decode_integer(hex_value, base_type)
+                int_val, ok = self.decode_integer(base_type)
                 if ok:
                     member = enum_def.get_member_by_value(int_val)
                     if member:
@@ -556,22 +542,40 @@ class Decoder:
                     is_valid = False
                     errors.append("Failed to decode enum value")
             else:
-                errors.append(f"Type '{field_type.enum_name}' not found (not an enum or message)")
+                errors.append(f"Type '{field_type.enum_name}' not found")
                 is_valid = False
 
         elif isinstance(field_type, BytesType):
+            # bytes[N] - consume bits and return as hex
+            consumed_val = self._read_bits(size_bits)
+            hex_value = format(consumed_val, f'0{(size_bits+7)//8*2}x') if consumed_val is not None else ""
             decoded_value = hex_value
-            # Handle match clause for structure
+            
             if field.match_clause:
-                decoded_value = self._decode_match(hex_value, field.match_clause, context)
+                # Sub-structure parsing
+                # For nested matches, we might need to reset bit_offset if it was a sub-parse
+                # but currently _decode_match expects to work from current position
+                current_bits = self.bit_offset
+                self.bit_offset = start_bit_offset # Rewind to start of bytes for match
+                decoded_value = self._decode_match(field.match_clause, context)
+                self.bit_offset = current_bits # Restore
             elif field.structure_body:
-                decoded_value = self._decode_structure(hex_value, field.structure_body, context)
+                current_bits = self.bit_offset
+                self.bit_offset = start_bit_offset
+                decoded_value = self._decode_structure(field.structure_body, context)
+                self.bit_offset = current_bits
 
         elif isinstance(field_type, StringType):
+            # Read bytes and decode
+            byte_count = size_bits // 8
+            raw_bytes = bytearray()
+            for _ in range(byte_count):
+                b = self._read_bits(8)
+                if b is None: break
+                raw_bytes.append(b)
+            
             try:
-                raw_bytes = bytes.fromhex(hex_value)
                 if field_type.is_cstr:
-                    # C-string: read until null
                     null_idx = raw_bytes.find(b'\x00')
                     if null_idx >= 0:
                         decoded_value = raw_bytes[:null_idx].decode('ascii', errors='replace')
@@ -580,91 +584,53 @@ class Decoder:
                 else:
                     decoded_value = raw_bytes.decode('ascii', errors='replace')
             except Exception as e:
-                decoded_value = hex_value
+                decoded_value = raw_bytes.hex()
                 errors.append(f"Failed to decode string: {e}")
 
         elif isinstance(field_type, PadType):
-            decoded_value = None  # Padding is discarded
+            # Consume and discard
+            self.bit_offset += size_bits
+            decoded_value = None
 
-            # Validate if default value is set
-            if field.default_value is not None:
-                expected_byte = field.default_value & 0xFF
-                expected_hex = (format(expected_byte, '02x') * size_bytes).lower()
-                if hex_value.lower() != expected_hex:
-                    is_valid = False
-                    errors.append(f"Padding mismatch: expected {expected_hex}, got {hex_value}")
-
-        elif isinstance(field_type, BitFieldType):
-            # Parse multi-byte value with proper endianness
-            raw_bytes = bytes.fromhex(hex_value)
-            endian = self.default_endian
-            if endian == Endianness.LITTLE:
-                int_val = int.from_bytes(raw_bytes, byteorder='little')
-            else:
-                int_val = int.from_bytes(raw_bytes, byteorder='big')
-            decoded_value = self._decode_bitfield(int_val, field, size_bytes)
-
-        else:
-            decoded_value = hex_value
-
+        # --- Post-Processing ---
         # Check fixed value
         if field.default_value is not None and not isinstance(field_type, PadType):
+            # Logic similar to before but using decoded_value
             expected_value = field.default_value
-            # Resolve constant reference
             if isinstance(expected_value, str):
                 const_val = self.get_constant_value(expected_value)
-                if const_val is not None:
-                    expected_value = const_val
+                if const_val is not None: expected_value = const_val
 
             if isinstance(expected_value, int) and isinstance(field_type, IntegerType):
-                # Compare decoded value to expected
-                expected_hex = self._encode_integer(expected_value, field_type)
-                if hex_value.lower() != expected_hex.lower():
+                # Use int comparison
+                # We need the numeric value if decoded_value is an enum string
+                numeric_val = decoded_value
+                if isinstance(decoded_value, str) and '.' in decoded_value:
+                    enum_def = self.get_enum(field_type.enum_name)
+                    if enum_def:
+                        m = enum_def.get_member_by_name(decoded_value.split('.')[1])
+                        if m: numeric_val = m.value
+                
+                if numeric_val != expected_value:
                     is_valid = False
-                    errors.append(f"Value mismatch: expected {expected_hex}, got {hex_value}")
+                    errors.append(f"Value mismatch: expected {expected_value}, got {numeric_val}")
 
             elif isinstance(expected_value, EnumValue):
-                # Compare enum value - check if decoded matches expected
                 expected_str = f"{expected_value.enum_name}.{expected_value.member_name}"
                 if decoded_value != expected_str:
                     is_valid = False
                     errors.append(f"Enum mismatch: expected {expected_str}, got {decoded_value}")
 
-        # Determine if field has constraints (enum type, default value, or embedded message with constraints)
-        is_constrained = False
-        if field.default_value is not None:
-            is_constrained = True
-        elif isinstance(field.type, EnumTypeRef):
-            # Check if it's an enum (not a message type)
-            if self.get_enum(field.type.enum_name):
-                is_constrained = True
-            else:
-                # Check if it's an embedded message with constraints
-                embedded_msg = self.coco_file.get_message(field.type.enum_name)
-                if embedded_msg and self._message_has_constraints(embedded_msg):
-                    is_constrained = True
-
-        # Determine if field is unbounded (bytes[] or string[] with no explicit size, or greedy [...])
-        # Such fields require encapsulation from a lower layer to be meaningful
-        # Exception: fields with match clauses have implicit structure from nested messages
-        # Exception: pad[...] is not semantically meaningful content, so it's not penalized
-        is_unbounded = (
-            isinstance(field.size, (VariableSize, GreedySize)) and
-            isinstance(field_type, (BytesType, StringType)) and
-            not isinstance(field_type, PadType) and  # padding is not meaningful content
-            not (isinstance(field_type, StringType) and field_type.is_cstr) and  # cstr has implicit delimiter
-            not field.match_clause  # match clause provides structure via nested messages
-        )
-
+        # Constraint check logic...
+        is_constrained = (field.default_value is not None) or (isinstance(field.type, EnumTypeRef) and self.get_enum(field.type.enum_name))
+        
         return DecodeResult(
             name=field.name,
             hex_value=hex_value,
             decoded_value=decoded_value,
             is_valid=is_valid,
-            expected_hex=expected_hex,
             errors=errors,
             is_constrained=is_constrained,
-            is_unbounded=is_unbounded,
         )
 
     def _get_message_fixed_size(self, msg: Message, context: dict) -> int | None:
@@ -699,7 +665,7 @@ class Decoder:
                     return True
         return False
 
-    def _get_field_size(self, field: Field, context: dict, remaining_bytes: int) -> int | None:
+    def _get_field_size(self, field: Field, context: dict, remaining_bits: int) -> int | None:
         """Determine the size of a field in bytes."""
         field_type = field.type
 
@@ -719,12 +685,12 @@ class Decoder:
                     # Message array - evaluate size expression for byte count
                     if isinstance(field.size, LiteralSize):
                         # Literal is element count, not byte count - use remaining
-                        return remaining_bytes
+                        return remaining_bits // 8
                     elif isinstance(field.size, FieldRefSize):
                         # Field ref could be element count or byte count
                         ref_value = self._resolve_field_path(field.size.field_path, context)
                         if ref_value is not None:
-                            return remaining_bytes
+                            return remaining_bits // 8
                         return None  # Can't resolve size
                     elif isinstance(field.size, SizeExpr):
                         # Size expression is byte count
@@ -734,7 +700,7 @@ class Decoder:
                         return None  # Can't resolve size expression
                     else:
                         # VariableSize - consume remaining
-                        return remaining_bytes
+                        return remaining_bits // 8
                 elif field.structure_body:
                     # Embedded message with overridden structure - calculate from structure_body
                     total = 0
@@ -749,17 +715,17 @@ class Decoder:
                     fixed_size = self._get_message_fixed_size(msg_def, context)
                     if fixed_size is not None:
                         return fixed_size
-                    # Message has variable-length fields - consume remaining bytes
-                    return remaining_bytes if remaining_bytes > 0 else None
+                    # Message has variable-length fields - consume remaining
+                    return remaining_bits // 8 if remaining_bits > 0 else None
             return 1  # Default to 1 byte
 
         if isinstance(field_type, BitFieldType):
-            return field_type.bit_count // 8  # bits[N] is N/8 bytes
+            return (field_type.bit_count + 7) // 8  # bits[N] is N bits, return bytes needed
 
         # Variable-size types - check size spec
         size = field.size
         if size is None:
-            return remaining_bytes  # Consume rest
+            return remaining_bits // 8  # Consume rest
 
         if isinstance(size, LiteralSize):
             return size.value
@@ -774,25 +740,53 @@ class Decoder:
             return self._eval_size_expr(size, context)
 
         if isinstance(size, GreedySize):
-            # Greedy size - consume all remaining bytes from outer layer
-            # 0 bytes is valid (nothing left to consume)
-            return remaining_bytes
+            # Greedy size - consume all remaining bits
+            return remaining_bits // 8
 
         if isinstance(size, FillToSize):
             # Fill to minimum size - consume bytes until total message size reaches target
             consumed_bytes = context.get('__consumed_bytes__', 0)
             needed_bytes = size.target_size - consumed_bytes
-            # If negative or zero, we've already reached/exceeded target - no padding needed
-            # If positive, return needed bytes (validation will fail if not enough bytes available)
             return max(0, needed_bytes)
 
-        if isinstance(size, VariableSize):
-            # Variable size can't be determined without remaining_bytes context
-            # Note: In new syntax, bare [] should have been converted to BranchDeterminedSize
-            # This is a fallback for safety
-            return remaining_bytes if remaining_bytes > 0 else None
+        if isinstance(size, UntilSize):
+            # Evaluate the terminator value
+            term_val = size.terminator
+            if isinstance(term_val, EnumValue):
+                enum_def = self.get_enum(term_val.enum_name)
+                if enum_def:
+                    member = next((m for m in enum_def.members if m.name == term_val.member_name), None)
+                    terminator_byte = member.value if member else None
+                else:
+                    return None
+            elif isinstance(term_val, int):
+                terminator_byte = term_val
+            else:
+                return None
 
-        return remaining_bytes if remaining_bytes > 0 else None
+            if terminator_byte is None:
+                return None
+
+            # Align to byte for scanning
+            byte_offset = (self.bit_offset + 7) // 8
+            raw_bytes = self.data[byte_offset:]
+            
+            # Search for terminator byte
+            term_idx = raw_bytes.find((terminator_byte & 0xFF).to_bytes(1, 'big'))
+            if term_idx >= 0:
+                return term_idx + 1
+            return None
+
+        if isinstance(size, VariableSize):
+            if isinstance(field_type, StringType) and field_type.is_cstr:
+                byte_offset = (self.bit_offset + 7) // 8
+                raw_bytes = self.data[byte_offset:]
+                null_idx = raw_bytes.find(b'\x00')
+                if null_idx >= 0:
+                    return null_idx + 1
+            return remaining_bits // 8 if remaining_bits > 0 else None
+
+        return remaining_bits // 8 if remaining_bits > 0 else None
 
     def _eval_size_expr(self, expr: SizeExpr, context: dict) -> int | None:
         """Evaluate a size expression to an integer value."""
@@ -929,7 +923,7 @@ class Decoder:
             value = value.val
         return value
 
-    def _decode_match(self, hex_str: str, match_clause: MatchClause, context: dict) -> dict:
+    def _decode_match(self, match_clause: MatchClause, context: dict) -> dict:
         """Decode a matched field based on discriminator value."""
         # Resolve dotted path discriminator (e.g., "header.protocol")
         discriminator_value = self._resolve_path(match_clause.discriminator, context)
@@ -960,187 +954,71 @@ class Decoder:
 
         branch = matching_branch or default_branch
         if branch and branch.fields:
-            return self._decode_structure(hex_str, branch.fields, context)
+            return self._decode_structure(branch.fields, context)
 
-        return {"raw": FieldValue(hex_str, hex_str)}
+        return {}
 
-    def _decode_match_consuming(self, hex_str: str, match_clause: MatchClause, context: dict) -> tuple[dict, int]:
-        """Decode a match clause and return (decoded_value, consumed_hex_chars).
-
-        Used for branch-determined size [*] where the match branch determines
-        the size of the containing field.
-
-        Args:
-            hex_str: Full remaining hex string (not pre-sliced)
-            match_clause: The match clause to evaluate
-            context: Context with already decoded values
-
-        Returns:
-            Tuple of (decoded dict, consumed hex characters count)
-        """
-        # Resolve dotted path discriminator (e.g., "header.protocol")
-        discriminator_value = self._resolve_path(match_clause.discriminator, context)
-
-        # Find matching branch
-        matching_branch = None
-        default_branch = None
-
-        for branch in match_clause.branches:
-            if branch.pattern is None:
-                default_branch = branch
-            elif isinstance(branch.pattern, EnumValue):
-                # Check enum value match
-                enum_str = f"{branch.pattern.enum_name}.{branch.pattern.member_name}"
-                if discriminator_value == enum_str:
-                    matching_branch = branch
-                    break
-                # Also check raw integer value
-                enum_def = self.get_enum(branch.pattern.enum_name)
-                if enum_def:
-                    member = enum_def.get_member_by_name(branch.pattern.member_name)
-                    if member and discriminator_value == member.value:
-                        matching_branch = branch
-                        break
-            elif branch.pattern == discriminator_value:
-                matching_branch = branch
-                break
-
-        branch = matching_branch or default_branch
-        if branch and branch.fields:
-            # Decode branch fields and track consumed bytes
-            result, consumed = self._decode_structure_consuming(hex_str, branch.fields, context)
-            return result, consumed
-
-        # Empty branch - consume 0 bytes
-        return {}, 0
-
-    def _decode_structure_consuming(self, hex_str: str, fields: list[Field], parent_context: dict) -> tuple[dict, int]:
-        """Decode a structure and return (decoded_value, consumed_hex_chars).
-
-        Similar to _decode_structure but returns consumed hex char count for
-        branch-determined sizing.
-        """
-        result = {}
-        context = dict(parent_context)
-        offset = 0
-
-        for field in fields:
-            remaining = hex_str[offset:]
-            if not remaining:
-                break
-
-            decode_result = self.decode_field(remaining, field, context)
-            result[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
-            context[field.name] = decode_result.decoded_value
-            if isinstance(decode_result.decoded_value, dict):
-                self._flatten_to_context(field.name, decode_result.decoded_value, context)
-
-            offset += len(decode_result.hex_value)
-
-        return result, offset
-
-    def _decode_structure(self, hex_str: str, fields: list[Field], parent_context: dict, track_validity: bool = False) -> dict | tuple[dict, bool]:
+    def _decode_structure(self, fields: list[Field], parent_context: dict, track_validity: bool = False) -> dict | tuple[dict, bool]:
         """Decode a nested structure.
-
-        Args:
-            hex_str: Hex string to decode
-            fields: List of fields to decode
-            parent_context: Context with already decoded values
-            track_validity: If True, return (dict, is_valid) tuple
 
         Returns:
             dict of FieldValue objects, or (dict, is_valid) if track_validity=True
         """
         result = {}
         context = dict(parent_context)
-        offset = 0
         all_valid = True
 
         for field in fields:
-            remaining = hex_str[offset:]
-            if not remaining:
-                break
+            # Track consumed bits for fill_to size calculation
+            # Note: context uses bytes for compatibility with existing fill_to logic
+            context['__consumed_bytes__'] = self.bit_offset // 8
 
-            decode_result = self.decode_field(remaining, field, context)
+            decode_result = self.decode_field(field, context)
             # Store both hex and decoded value for display flexibility
             result[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
             # Context still uses plain values for size references and match lookups
             context[field.name] = decode_result.decoded_value
-            # Flatten dict values for dotted path lookups (e.g., data_offset_flags.data_offset)
+            # Flatten dict values for dotted path lookups
             if isinstance(decode_result.decoded_value, dict):
                 self._flatten_to_context(field.name, decode_result.decoded_value, context)
 
             if not decode_result.is_valid:
                 all_valid = False
 
-            offset += len(decode_result.hex_value)
-
         if track_validity:
             return result, all_valid
         return result
 
-    def _decode_embedded_message(self, hex_str: str, msg_def: Message, context: dict) -> tuple[dict, int]:
+    def _decode_embedded_message(self, msg_def: Message, context: dict) -> tuple[dict, int]:
         """Decode a single embedded message.
 
-        Args:
-            hex_str: Hex string containing the message data
-            msg_def: Message definition to decode
-            context: Context with field values
-
         Returns:
-            Tuple of (decoded message dict with FieldValue objects, consumed byte count)
+            Tuple of (decoded message dict, consumed bit count)
         """
+        start_bits = self.bit_offset
         fields = self.resolve_message(msg_def)
         result = {}
-        offset = 0
         local_context = dict(context)
 
         for field in fields:
-            remaining = hex_str[offset:]
-            if not remaining:
-                break
-
-            decode_result = self.decode_field(remaining, field, local_context)
-            # Store both hex and decoded value for display flexibility
+            decode_result = self.decode_field(field, local_context)
             result[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
 
-            # Store decoded value in local context for subsequent field refs (match, size)
-            if isinstance(decode_result.decoded_value, (int, float)):
-                local_context[field.name] = decode_result.decoded_value
-            elif isinstance(decode_result.decoded_value, dict):
-                # Bitfield or embedded message - store dict and flatten for dotted path refs
-                local_context[field.name] = decode_result.decoded_value
-                self._flatten_to_context(field.name, decode_result.decoded_value, local_context)
-            elif isinstance(decode_result.decoded_value, str):
-                # String values including enum decoded values (e.g., "EtherType.IPV4")
-                local_context[field.name] = decode_result.decoded_value
-            elif isinstance(field.type, IntegerType) and decode_result.hex_value:
-                try:
-                    local_context[field.name] = int(decode_result.hex_value, 16)
-                except ValueError:
-                    pass
+            # Update local context
+            val = decode_result.decoded_value
+            if isinstance(val, (int, float, str)):
+                local_context[field.name] = val
+            elif isinstance(val, dict):
+                local_context[field.name] = val
+                self._flatten_to_context(field.name, val, local_context)
 
-            offset += len(decode_result.hex_value)
+        consumed_bits = self.bit_offset - start_bits
+        return result, consumed_bits
 
-        return result, offset // 2
-
-    def _decode_message_array(self, hex_str: str, msg_def: Message, field: Field, context: dict) -> tuple[list, int]:
-        """Decode an array of messages.
-
-        Supports polymorphic arrays: if msg_def has subtypes, each element
-        is parsed by trying all subtypes and picking the best match.
-
-        Args:
-            hex_str: Hex string containing the array data
-            msg_def: Message definition for array elements
-            field: Field definition (contains size spec for count)
-            context: Context with field values (for count reference)
-
-        Returns:
-            Tuple of (list of decoded message dictionaries, consumed byte count)
-        """
+    def _decode_message_array(self, msg_def: Message, field: Field, context: dict) -> tuple[list, int]:
+        """Decode an array of messages."""
+        start_bits = self.bit_offset
         result = []
-        offset = 0
 
         # Determine count
         count = None
@@ -1148,130 +1026,96 @@ class Decoder:
             count = field.size.value
         elif isinstance(field.size, FieldRefSize):
             count = self._resolve_field_path(field.size.field_path, context) or 0
-        # VariableSize means decode until end
 
         # Get subtypes for polymorphic parsing
         subtypes = self.coco_file.get_subtypes(msg_def.name)
-        if subtypes:
-            # Use only subtypes (sorted by inheritance depth, most specific first)
-            # Base type is used as fallback only if no subtype matches
-            candidate_types = sorted(subtypes, key=lambda m: -self._get_inheritance_depth(m.name))
-            fallback_type = msg_def
-        else:
-            # No subtypes - just use base type
-            candidate_types = [msg_def]
-            fallback_type = None
+        candidate_types = sorted(subtypes, key=lambda m: -self._get_inheritance_depth(m.name)) if subtypes else [msg_def]
+        fallback_type = msg_def if subtypes else None
 
         element_idx = 0
-        while offset < len(hex_str):
+        while self.bit_offset < len(self.data) * 8:
             if count is not None and element_idx >= count:
-                break
-
-            remaining = hex_str[offset:]
-            if not remaining:
                 break
 
             # Try each candidate type and pick the best match
             best_result = None
-            best_hex_len = 0
-
-            # Save chain before trying candidates (validate_message resets it)
-            saved_chain = list(self._protocol_chain)
+            best_bits = 0
+            original_offset = self.bit_offset
 
             for candidate in candidate_types:
-                # Allow remaining bytes for array elements (they consume only what they need)
-                candidate_result = self.validate_message(candidate, remaining, allow_remaining=True)
-
-                # Calculate consumed bytes for this candidate
-                candidate_hex_len = sum(len(f.hex_value) for f in candidate_result.fields)
-
-                # Skip if no bytes consumed (would cause infinite loop)
-                if candidate_hex_len == 0:
+                # Use a separate Decoder instance for trials to avoid corrupting state
+                trial_decoder = Decoder(self.coco_file)
+                trial_decoder.data = self.data
+                trial_decoder.bit_offset = original_offset
+                trial_decoder.default_endian = self.default_endian
+                
+                try:
+                    trial_res = trial_decoder.validate_message(candidate, allow_remaining=True)
+                    if trial_res.is_valid:
+                        consumed = trial_decoder.bit_offset - original_offset
+                        if consumed == 0:
+                            continue
+                            
+                        if best_result is None or trial_res.validated_constraints > best_result.validated_constraints:
+                            best_result = trial_res
+                            best_bits = consumed
+                except Exception:
                     continue
 
-                # Only accept valid candidates with validated constraints
-                # (subtypes should have default values that validate)
-                if not candidate_result.is_valid:
-                    continue
-
-                # Pick this candidate if it has more validated constraints
-                if best_result is None:
-                    best_result = candidate_result
-                    best_hex_len = candidate_hex_len
-                elif candidate_result.validated_constraints > best_result.validated_constraints:
-                    best_result = candidate_result
-                    best_hex_len = candidate_hex_len
-
-            # If no subtype matched, try the fallback (base) type
-            if best_result is None and fallback_type is not None:
-                fallback_result = self.validate_message(fallback_type, remaining, allow_remaining=True)
-                fallback_hex_len = sum(len(f.hex_value) for f in fallback_result.fields)
-                if fallback_hex_len > 0:
-                    best_result = fallback_result
-                    best_hex_len = fallback_hex_len
-
-            # Restore chain after trying candidates
-            self._protocol_chain = saved_chain
-
-            if best_result is None or best_hex_len == 0:
-                # No candidate could parse, stop
+            if best_result:
+                element_dict = {f.name: FieldValue(f.hex_value, f.decoded_value) for f in best_result.fields}
+                result.append(element_dict)
+                self.bit_offset = original_offset + best_bits
+                element_idx += 1
+            else:
                 break
 
-            # Extract decoded values as a dict with FieldValue objects
-            element_dict = {}
-            for field_result in best_result.fields:
-                element_dict[field_result.name] = FieldValue(field_result.hex_value, field_result.decoded_value)
+        return result, self.bit_offset - start_bits
 
-            result.append(element_dict)
-            offset += best_hex_len
-            element_idx += 1
-
-        # Return list and consumed byte count (offset is in hex chars, divide by 2)
-        return result, offset // 2
-
-    def validate_message(self, msg: Message, hex_str: str, allow_remaining: bool = False) -> ValidationResult:
-        """Validate a hex message against a message definition.
+    def validate_message(self, msg: Message, hex_str: str = None, allow_remaining: bool = False) -> ValidationResult:
+        """Validate a binary message against a message definition.
 
         Args:
             msg: Message definition
-            hex_str: Hex string to validate
-            allow_remaining: If True, don't fail on remaining bytes (for polymorphic arrays)
+            hex_str: Optional hex string to validate. If None, uses self.data.
+            allow_remaining: If True, don't fail on remaining bytes
 
         Returns:
             ValidationResult with field-by-field results
         """
-        hex_str = hex_str.lower().replace(" ", "")
+        if hex_str is not None:
+            hex_str = hex_str.lower().replace(" ", "")
+            try:
+                self.data = bytes.fromhex(hex_str)
+            except ValueError:
+                self.data = b""
+            self.bit_offset = 0
+            
         fields = self.resolve_message(msg)
 
         # Reset protocol chain for this validation
         self._protocol_chain = []
 
-        # Add root layer message to chain (uses message name since there's no field name)
+        # Add root layer message to chain
         if msg.is_layer:
             self._protocol_chain.append(self._get_chain_name(msg.name))
 
         results = []
         context = {}
-        offset = 0
         all_valid = True
 
         for field in fields:
-            remaining = hex_str[offset:]
-            # Track consumed bytes for fill_to size calculation
-            context['__consumed_bytes__'] = offset // 2
+            # Track consumed bits for fill_to size calculation
+            context['__consumed_bytes__'] = self.bit_offset // 8
 
-            # Allow empty remaining for GreedySize, FillToSize, and BranchDeterminedSize
-            # (BranchDeterminedSize can consume 0 bytes for empty match branches)
-            # (GreedySize consumes all remaining, including 0 bytes)
-            # (FillToSize can consume 0 bytes if target size already reached)
-            # Also allow empty remaining for message arrays with count=0
+            # Check if we have enough bits left
+            # Special case for 0-length fields
             skip_no_bytes_check = isinstance(field.size, (GreedySize, FillToSize, BranchDeterminedSize))
-
+            
             # Check if this is a message array with count=0
             if not skip_no_bytes_check and isinstance(field.type, EnumTypeRef):
-                msg_def = self.coco_file.get_message(field.type.enum_name)
-                if msg_def and field.size is not None:
-                    # This is a message array - check if count is 0
+                m_def = self.coco_file.get_message(field.type.enum_name)
+                if m_def and field.size is not None:
                     count = None
                     if isinstance(field.size, LiteralSize):
                         count = field.size.value
@@ -1280,64 +1124,52 @@ class Decoder:
                     if count == 0:
                         skip_no_bytes_check = True
 
-            if not remaining and not skip_no_bytes_check:
-                # Not enough bytes
+            if self.bit_offset >= len(self.data) * 8 and not skip_no_bytes_check:
                 results.append(DecodeResult(
                     name=field.name,
                     hex_value="",
                     decoded_value=None,
                     is_valid=False,
-                    errors=["No bytes remaining"]
+                    errors=["No bits remaining"]
                 ))
                 all_valid = False
                 continue
 
-            result = self.decode_field(remaining, field, context)
+            result = self.decode_field(field, context)
             results.append(result)
 
             # Update context with decoded value
-            if isinstance(result.decoded_value, int):
+            if isinstance(result.decoded_value, (int, float)):
                 context[field.name] = result.decoded_value
             elif isinstance(result.decoded_value, dict):
-                # Embedded message - store the dict and add flattened entries
                 context[field.name] = result.decoded_value
                 self._flatten_to_context(field.name, result.decoded_value, context)
             elif isinstance(result.decoded_value, str) and result.decoded_value.startswith("0x"):
-                pass  # Keep as hex
-            elif isinstance(field.type, IntegerType):
-                # Store integer value for size references
-                try:
-                    context[field.name] = int(result.hex_value, 16) if result.hex_value else 0
-                except ValueError:
-                    pass
-
-            # Also store raw integer for enum fields
+                pass
+            
+            # For enum fields, store raw integer too
             if isinstance(field.type, EnumTypeRef) and result.hex_value:
                 enum_def = self.get_enum(field.type.enum_name)
                 if enum_def:
                     base_type = IntegerType(base=enum_def.base_type)
-                    int_val, _ = self.decode_integer(result.hex_value, base_type)
+                    # Use a fresh decoder to avoid state corruption
+                    temp_decoder = Decoder(self.coco_file)
+                    temp_decoder.data = bytes.fromhex(result.hex_value)
+                    int_val, _ = temp_decoder.decode_integer(base_type)
                     context[field.name] = int_val
 
             if not result.is_valid:
                 all_valid = False
 
-            offset += len(result.hex_value)
-
-        remaining_bytes = hex_str[offset:]
-
-        # Validity is based on field validation only, not remaining bytes.
-        # Remaining bytes are tracked separately and used as a ranking penalty
-        # in identify_message(), but don't make the message "invalid".
-        # For polymorphic arrays (allow_remaining=True), this is already the behavior.
-        is_fully_valid = all_valid
+        remaining_bits = (len(self.data) * 8) - self.bit_offset
+        remaining_hex = self.data[self.bit_offset // 8:].hex() if remaining_bits > 0 else ""
 
         return ValidationResult(
-            is_valid=is_fully_valid,
+            is_valid=all_valid,
             message_name=msg.name,
             fields=results,
-            remaining_bytes=remaining_bytes,
-            protocol_chain=list(self._protocol_chain),  # Copy the chain
+            remaining_bytes=remaining_hex,
+            protocol_chain=list(self._protocol_chain),
         )
 
     def validate_by_name(self, message_name: str, hex_str: str) -> ValidationResult:

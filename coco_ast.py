@@ -71,9 +71,12 @@ class IntegerType:
         return self.base.startswith("i")
 
     @property
+    def bit_size(self) -> int:
+        return int(self.base[1:])
+
+    @property
     def byte_size(self) -> int:
-        sizes = {"8": 1, "16": 2, "32": 4, "64": 8}
-        return sizes[self.base[1:]]
+        return self.bit_size // 8
 
 
 @dataclass
@@ -250,6 +253,7 @@ class Field:
     name: str
     type: FieldType
     size: SizeSpec = None
+    offset: SizeSpec = None  # For @ jumps
     default_value: int | str | EnumValue | None = None
     match_clause: MatchClause | None = None
     attributes: FieldAttributes | None = None

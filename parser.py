@@ -150,8 +150,6 @@ class CocoTransformer(Transformer):
     def bitfield_type(self, items):
         # items[0] is the INT token with the bit count
         bit_count = int(items[0])
-        if bit_count % 8 != 0:
-            raise ValueError(f"bits[{bit_count}]: bit count must be a multiple of 8")
         return BitFieldType(bit_count=bit_count)
 
     def BYTES_KW(self, token):
@@ -576,18 +574,21 @@ class CocoTransformer(Transformer):
         return BitFieldBody(fields=list(items))
 
     def bitfield(self, items):
-        """Handle bitfield: bits[N] field_name { ... }"""
+        """Handle bitfield: bits[N] field_name { ... } match ..."""
         # items[0] is BitFieldType (with bit_count from parsing)
         bitfield_type = items[0]
         name = items[1]
         idx = 2
 
         body = None
+        match = None
         attrs = None
 
         for item in items[idx:]:
             if isinstance(item, BitFieldBody):
                 body = item
+            elif isinstance(item, MatchClause):
+                match = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
 
@@ -595,6 +596,7 @@ class CocoTransformer(Transformer):
             name=name,
             type=bitfield_type,
             bitfield_body=body,
+            match_clause=match,
             attributes=attrs,
         )
 
