@@ -74,6 +74,7 @@ size_spec: "[" size_value "]"
 size_value: size_expr       // expression (includes simple values)
           | GREEDY_SIZE     // greedy size [...] - consumes all remaining
           | "fill_to" ":" DEC_NUMBER  -> fill_to_size  // fill to minimum size [fill_to: N]
+          | "until" ":" value_expr  -> until_size  // terminator-based size [until: 0x00]
           |                 // empty = variable length (or branch-determined with match)
 
 GREEDY_SIZE.2: "..."  // Higher priority than operators
@@ -121,6 +122,7 @@ match_body: "{" message_body "}"     // full form: { field1; field2 }
 
 match_pattern: HEX_NUMBER
              | DEC_NUMBER
+             | BIN_NUMBER
              | enum_value
              | "_"          // default case
 

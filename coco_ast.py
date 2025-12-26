@@ -166,6 +166,21 @@ class FillToSize:
 
 
 @dataclass
+class UntilSize:
+    """Terminator-based size: [until: value]
+
+    Reads bytes until a specific terminator value is encountered (inclusive).
+    The terminator byte is included in the field.
+    Used for null-terminated strings, DNS label sequences, etc.
+
+    Examples:
+        bytes qname[until: 0x00]  # Read until null byte (inclusive)
+        bytes label[until: 0xFF]  # Read until 0xFF marker
+    """
+    terminator: 'Value'
+
+
+@dataclass
 class BranchDeterminedSize:
     """Size determined by matched branch: [*]
 
@@ -175,7 +190,7 @@ class BranchDeterminedSize:
     pass
 
 
-SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | FillToSize | BranchDeterminedSize | None
+SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | FillToSize | UntilSize | BranchDeterminedSize | None
 
 
 # === Values ===

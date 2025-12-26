@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: dns_response_tree
+
+COMMAND="python3 protococo.py find 10328180000100010000000006676f6f676c6503636f6d0000100001c00c001000010000010e00100f763d7370663120707472203f616c6c --cocofile=protocols/dns.coco --dissect --tree -L 16"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/find/fixtures/dns_response_tree.expected"

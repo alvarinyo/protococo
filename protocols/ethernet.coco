@@ -40,16 +40,27 @@ layer message vlan_frame {
   }
 }
 
-// Ethernet frame with polymorphic payload based on ethertype
-// Note: Ethernet has 64-byte minimum frame size (60 without FCS), so padding may be present
-layer message ethernet_frame {
-  ethernet_header eth
-  bytes payload[] match eth.ethertype {
+// Ethernet frame base - common structure for all Ethernet frames
+message ethernet_frame_base {
+  ethernet_header header
+  bytes payload[] match header.ethertype {
     EtherType.IPV4 -> ipv4_packet ip
     EtherType.IPV6 -> ipv6_packet ip6
     EtherType.ARP -> arp_packet arp
     EtherType.VLAN -> vlan_frame vlan
     _ -> {}
   }
-  pad[fill_to: 60]  // Fill to Ethernet minimum frame size (60 bytes without FCS)
+}
+
+// Standard Ethernet frame (IEEE 802.3)
+// 64-byte minimum on wire, includes 4-byte FCS
+layer message ethernet_frame extends ethernet_frame_base {
+  bytes fcs[4]      // Frame Check Sequence (CRC32)
+  pad[fill_to: 64]  // IEEE 802.3 minimum frame size (64 bytes)
+}
+
+// Ethernet frame with FCS stripped (common in PCAPs)
+// Most NICs validate and strip the FCS before passing frames to the OS
+layer message ethernet_no_fcs_frame extends ethernet_frame_base {
+  pad[fill_to: 60]  // 64-byte minimum minus 4-byte FCS
 }

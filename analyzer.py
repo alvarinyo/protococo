@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, BranchDeterminedSize,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize,
     EnumValue, MatchClause,
     Endianness,
 )
@@ -384,8 +384,77 @@ class Decoder:
                 errors=[]
             )
 
-        # Determine field size
-        size_bytes = self._get_field_size(field, context, len(hex_str) // 2)
+        # Special handling for until-based size - scan for terminator
+        if isinstance(field.size, UntilSize):
+            try:
+                # Evaluate the terminator value
+                term_val = field.size.terminator
+                if isinstance(term_val, EnumValue):
+                    # Look up enum value
+                    enum_def = self.get_enum(term_val.enum_name)
+                    if enum_def:
+                        member = next((m for m in enum_def.members if m.name == term_val.member_name), None)
+                        if member:
+                            terminator_value = member.value
+                        else:
+                            return DecodeResult(
+                                name=field.name,
+                                hex_value="",
+                                decoded_value=None,
+                                is_valid=False,
+                                errors=[f"Unknown enum member: {term_val.enum_name}.{term_val.member_name}"]
+                            )
+                    else:
+                        return DecodeResult(
+                            name=field.name,
+                            hex_value="",
+                            decoded_value=None,
+                            is_valid=False,
+                            errors=[f"Unknown enum: {term_val.enum_name}"]
+                        )
+                elif isinstance(term_val, int):
+                    terminator_value = term_val
+                else:
+                    return DecodeResult(
+                        name=field.name,
+                        hex_value="",
+                        decoded_value=None,
+                        is_valid=False,
+                        errors=[f"Unsupported terminator type: {type(term_val)}"]
+                    )
+
+                # Convert hex string to bytes for scanning
+                raw_bytes = bytes.fromhex(hex_str)
+
+                # Search for terminator byte
+                terminator_byte = int(terminator_value) & 0xFF
+                term_idx = raw_bytes.find(terminator_byte.to_bytes(1, 'big'))
+
+                if term_idx >= 0:
+                    # Found terminator - size includes the terminator
+                    size_bytes = term_idx + 1
+                else:
+                    # Terminator not found
+                    return DecodeResult(
+                        name=field.name,
+                        hex_value=hex_str,
+                        decoded_value=None,
+                        is_valid=False,
+                        errors=[f"Terminator 0x{terminator_byte:02X} not found in remaining {len(raw_bytes)} bytes"]
+                    )
+            except (ValueError, TypeError) as e:
+                return DecodeResult(
+                    name=field.name,
+                    hex_value="",
+                    decoded_value=None,
+                    is_valid=False,
+                    errors=[f"Error scanning for terminator: {str(e)}"]
+                )
+        else:
+            # Determine field size normally
+            size_bytes = self._get_field_size(field, context, len(hex_str) // 2)
+
+        # Check if size was determined
         if size_bytes is None:
             return DecodeResult(
                 name=field.name,
@@ -713,9 +782,9 @@ class Decoder:
             # Fill to minimum size - consume bytes until total message size reaches target
             consumed_bytes = context.get('__consumed_bytes__', 0)
             needed_bytes = size.target_size - consumed_bytes
-            # Clamp to remaining_bytes (don't exceed what's available)
-            # 0 or negative means we've already reached/exceeded target size
-            return max(0, min(needed_bytes, remaining_bytes))
+            # If negative or zero, we've already reached/exceeded target - no padding needed
+            # If positive, return needed bytes (validation will fail if not enough bytes available)
+            return max(0, needed_bytes)
 
         if isinstance(size, VariableSize):
             # Variable size can't be determined without remaining_bytes context
@@ -1195,7 +1264,23 @@ class Decoder:
             # (BranchDeterminedSize can consume 0 bytes for empty match branches)
             # (GreedySize consumes all remaining, including 0 bytes)
             # (FillToSize can consume 0 bytes if target size already reached)
-            if not remaining and not isinstance(field.size, (GreedySize, FillToSize, BranchDeterminedSize)):
+            # Also allow empty remaining for message arrays with count=0
+            skip_no_bytes_check = isinstance(field.size, (GreedySize, FillToSize, BranchDeterminedSize))
+
+            # Check if this is a message array with count=0
+            if not skip_no_bytes_check and isinstance(field.type, EnumTypeRef):
+                msg_def = self.coco_file.get_message(field.type.enum_name)
+                if msg_def and field.size is not None:
+                    # This is a message array - check if count is 0
+                    count = None
+                    if isinstance(field.size, LiteralSize):
+                        count = field.size.value
+                    elif isinstance(field.size, FieldRefSize):
+                        count = self._resolve_field_path(field.size.field_path, context) or 0
+                    if count == 0:
+                        skip_no_bytes_check = True
+
+            if not remaining and not skip_no_bytes_check:
                 # Not enough bytes
                 results.append(DecodeResult(
                     name=field.name,
@@ -1284,7 +1369,7 @@ class Decoder:
         results.sort(key=lambda r: (
             not r.is_valid,
             r.has_unbounded_fields,       # Penalize messages with unbounded bytes[] at root level
-            len(r.remaining_bytes) > 0,   # Strongly prefer complete parses (no remaining bytes)
+            len(r.remaining_bytes),       # Strongly prefer complete parses (fewer remaining bytes is better)
             -r.validated_constraints,     # Prefer messages with more validated enum/default fields
             r.minimal_array_elements,     # Penalize messages with many single-field array elements
             -r.total_structured_fields,   # Prefer messages that parse into more leaf fields

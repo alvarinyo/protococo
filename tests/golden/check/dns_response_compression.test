@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: dns_response_compression
+
+COMMAND="python3 protococo.py check dns_message 10328180000100010000000006676f6f676c6503636f6d0000100001c00c001000010000010e00100f763d7370663120707472203f616c6c --cocofile=protocols/dns.coco --tree"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/dns_response_compression.expected"

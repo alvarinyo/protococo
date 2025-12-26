@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: tree_layer_colors
+
+COMMAND="python3 protococo.py find 00e018b10cad00c09f32418c0800 --cocofile=protocols/internet_stack.coco --dissect --format=tree --layer-colors"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/find/fixtures/dns_tree_colors.expected"

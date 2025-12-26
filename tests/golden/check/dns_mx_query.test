@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: dns_mx_query
+
+COMMAND="python3 protococo.py check dns_message f76f0100000100000000000006676f6f676c6503636f6d00000f0001 --cocofile=protocols/dns.coco --decode --format=porcelain"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/dns_mx_query.expected"

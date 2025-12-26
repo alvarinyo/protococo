@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: dns_list_all_matches
+
+COMMAND="python3 protococo.py find 10320100000100000000000006676f6f676c6503636f6d0000100001 --cocofile=protocols/dns.coco --list --format=porcelain"
+EXPECTED_EXIT=1
+EXPECTED_OUTPUT="tests/golden/find/fixtures/dns_list_all_matches.expected"

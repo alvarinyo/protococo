@@ -527,6 +527,10 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         hex_val = field_result.hex_value
         decoded = field_result.decoded_value
 
+        # Show "(none)" for empty fields (0 bytes) when decoding
+        if decode and (not hex_val or len(hex_val) == 0):
+            return "(none)"
+
         # If decode=False, always return raw hex (truncated if needed)
         if not decode:
             if isinstance(decoded, dict):
@@ -600,7 +604,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 return idx
         return -1
 
-    def add_field(field_result: DecodeResult, ancestors: list[bool] = None, metadata=None, is_last=False, parent_path: str = "", layer_stack: list[int] = None, base_layer_idx: int = -1):
+    def add_field(field_result: DecodeResult, ancestors: list[bool] = None, metadata=None, is_last=False, parent_path: str = "", layer_stack: list[int] = None, current_layer_idx: int = -1):
         """Add a field to the tree."""
         if ancestors is None:
             ancestors = []
@@ -609,17 +613,6 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
         name = field_result.name if field_result.name else "+"
         field_path = f"{parent_path}.{name}" if parent_path else name
-
-        # Check if this field is a layer field - use its position in the chain
-        # For root-level fields (empty layer_stack), use base_layer_idx if field is not itself a layer
-        field_layer_idx = layer_positions.get(name, -1)
-        if field_layer_idx >= 0:
-            current_layer_idx = field_layer_idx
-        elif not layer_stack and base_layer_idx >= 0:
-            # Root-level non-layer field: use base layer
-            current_layer_idx = base_layer_idx
-        else:
-            current_layer_idx = -1
 
         # Check if this field or any descendants match the filter
         self_matches = field_matches_filter(name, field_path, filter_fields)
@@ -639,8 +632,19 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         else:
             color = AnsiColors.FAIL
 
-        # Determine background layer: use current if it's a layer, otherwise last valid layer from stack
-        content_layer_idx = current_layer_idx if current_layer_idx >= 0 else get_effective_layer(layer_stack)
+        # Determine background layer for this field's label and for sibling lines
+        content_layer_idx = current_layer_idx
+
+        # Check if this field is a layer field - use its position in the chain
+        field_layer_idx = layer_positions.get(name, -1)
+
+        # Determine layer for nested content
+        # If this field IS a layer, nested content uses its layer color
+        # Otherwise, nested content inherits current layer
+        if field_layer_idx >= 0:
+            nested_content_layer = field_layer_idx
+        else:
+            nested_content_layer = content_layer_idx
 
         # Check if this field uses branch-determined size [*] and should be flattened
         from coco_ast import BranchDeterminedSize
@@ -649,7 +653,8 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         # If branch-determined and has nested content, flatten it at this level
         if is_branch_determined and has_nested:
             # Don't show this field name, just show its contents flattened
-            add_nested_dict(field_result.decoded_value, ancestors, parent_path, layer_stack)
+            # Pass is_last_sibling to indicate whether there are more fields after this one
+            add_nested_dict(field_result.decoded_value, ancestors, parent_path, layer_stack, is_last_sibling=is_last, current_layer_idx=current_layer_idx)
             return
 
         # Handle arrays
@@ -662,13 +667,13 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             for j, item in enumerate(field_result.decoded_value):
                 item_is_last = (j == len(field_result.decoded_value) - 1)
                 item_connector_str = "└── " if item_is_last else "├── "
-                item_connector = build_connector(item_connector_str, content_layer_idx)
+                item_connector = build_connector(item_connector_str, nested_content_layer)
                 if isinstance(item, dict):
                     item_content = f"[{j}]:"
-                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, nested_content_layer)}")
                     item_ancestors = list_ancestors + [not item_is_last]
-                    item_layer_stack = new_layer_stack + [content_layer_idx]
-                    add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack)
+                    item_layer_stack = new_layer_stack + [nested_content_layer]
+                    add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack, current_layer_idx=nested_content_layer)
                 else:
                     # List items that might be FieldValue
                     from analyzer import FieldValue
@@ -677,7 +682,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                     else:
                         item_display = str(item)
                     item_content = f"[{j}]: {color}{item_display}{AnsiColors.ENDC}"
-                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+                    lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, nested_content_layer)}")
             return
 
         value = format_value(field_result, metadata)
@@ -692,12 +697,17 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             if has_nested:
                 # Pass down whether this level needs continuation
                 new_ancestors = ancestors + [not is_last]
-                # Add effective layer to stack for nested content (preserves parent layer for non-layer fields)
+                # Add layer to stack: use current level color for sibling continuation lines
                 new_layer_stack = layer_stack + [content_layer_idx]
-                add_nested_dict(field_result.decoded_value, new_ancestors, field_path, new_layer_stack)
+                add_nested_dict(field_result.decoded_value, new_ancestors, field_path, new_layer_stack, current_layer_idx=nested_content_layer)
 
-    def add_nested_dict(d: dict, ancestors: list[bool], parent_path: str = "", layer_stack: list[int] = None):
-        """Add a nested dict to the tree. Values are FieldValue objects."""
+    def add_nested_dict(d: dict, ancestors: list[bool], parent_path: str = "", layer_stack: list[int] = None, is_last_sibling: bool = True, current_layer_idx: int = -1):
+        """Add a nested dict to the tree. Values are FieldValue objects.
+
+        Args:
+            is_last_sibling: Whether this nested dict is the last sibling at its parent level
+                           (used when flattening branch-determined fields to preserve tree structure)
+        """
         if layer_stack is None:
             layer_stack = []
 
@@ -720,7 +730,8 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         prefix = build_prefix(ancestors, layer_stack)
 
         for i, (k, v) in enumerate(filtered_items):
-            is_last = (i == len(filtered_items) - 1)
+            # An item is the last child if it's the last in filtered_items AND the parent is the last sibling
+            is_last = (i == len(filtered_items) - 1) and is_last_sibling
             connector_str = "└── " if is_last else "├── "
 
             # Build field path for metadata lookup
@@ -729,9 +740,14 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             # Check if this field is a layer field - use its position in the chain
             layer_idx = layer_positions.get(k, -1)
 
-            # Determine content background: use layer_idx if it's a layer, else last valid layer from stack
-            content_layer_idx = layer_idx if layer_idx >= 0 else get_effective_layer(layer_stack)
-            connector = build_connector(connector_str, content_layer_idx)
+            # Determine layer to add to stack for this field's nested content
+            # Only changes if this field IS a layer - then children use the new layer color
+            if layer_idx >= 0:
+                nested_content_layer_idx = layer_idx
+            else:
+                nested_content_layer_idx = current_layer_idx
+
+            connector = build_connector(connector_str, current_layer_idx)
 
             # Extract hex and decoded value from FieldValue
             if isinstance(v, FieldValue):
@@ -753,30 +769,30 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
                 if is_branch_determined:
                     # Flatten: don't show field name, just show its contents at this level
-                    add_nested_dict(actual_val, ancestors, parent_path, layer_stack)
+                    add_nested_dict(actual_val, ancestors, parent_path, layer_stack, current_layer_idx=current_layer_idx)
                 else:
                     # Normal nested dict: show field name and nest contents
                     content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}:"
-                    lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
+                    lines.append(f"{prefix}{connector}{format_line_content(content, current_layer_idx)}")
                     new_ancestors = ancestors + [not is_last]
-                    new_layer_stack = layer_stack + [content_layer_idx]
-                    add_nested_dict(actual_val, new_ancestors, field_path, new_layer_stack)
+                    new_layer_stack = layer_stack + [current_layer_idx]
+                    add_nested_dict(actual_val, new_ancestors, field_path, new_layer_stack, current_layer_idx=nested_content_layer_idx)
             elif isinstance(actual_val, list):
                 content = f"{AnsiColors.BOLD}{k}{AnsiColors.ENDC}: [{len(actual_val)} items]"
-                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
+                lines.append(f"{prefix}{connector}{format_line_content(content, current_layer_idx)}")
                 list_ancestors = ancestors + [not is_last]
-                new_layer_stack = layer_stack + [content_layer_idx]
+                new_layer_stack = layer_stack + [current_layer_idx]
                 list_prefix = build_prefix(list_ancestors, new_layer_stack)
                 for j, item in enumerate(actual_val):
                     item_is_last = (j == len(actual_val) - 1)
                     item_connector_str = "└── " if item_is_last else "├── "
-                    item_connector = build_connector(item_connector_str, content_layer_idx)
+                    item_connector = build_connector(item_connector_str, nested_content_layer_idx)
                     if isinstance(item, dict):
                         item_content = f"[{j}]:"
-                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, nested_content_layer_idx)}")
                         item_ancestors = list_ancestors + [not item_is_last]
-                        item_layer_stack = new_layer_stack + [content_layer_idx]
-                        add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack)
+                        item_layer_stack = new_layer_stack + [nested_content_layer_idx]
+                        add_nested_dict(item, item_ancestors, f"{field_path}[{j}]", item_layer_stack, current_layer_idx=nested_content_layer_idx)
                     else:
                         # List items that are FieldValue
                         if isinstance(item, FieldValue):
@@ -787,7 +803,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                         if isinstance(item_display, str):
                             item_display = truncate_field_value(item_display, field_bytes_limit)
                         item_content = f"[{j}]: {AnsiColors.OKGREEN}{item_display}{AnsiColors.ENDC}"
-                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, content_layer_idx)}")
+                        lines.append(f"{list_prefix}{item_connector}{format_line_content(item_content, nested_content_layer_idx)}")
             else:
                 color = AnsiColors.OKGREEN
                 skip_truncation = False
@@ -820,7 +836,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                     formatted_value = truncate_field_value(formatted_value, field_bytes_limit)
 
                 content = f"{k}: {color}{formatted_value}{AnsiColors.ENDC}"
-                lines.append(f"{prefix}{connector}{format_line_content(content, content_layer_idx)}")
+                lines.append(f"{prefix}{connector}{format_line_content(content, current_layer_idx)}")
 
     # Process all fields - filter to only show relevant ones
     visible_fields = []
@@ -839,7 +855,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
     for i, field in enumerate(visible_fields):
         is_last = (i == len(visible_fields) - 1) and not validation_result.remaining_bytes
         metadata = fields_metadata.get(field.name) if fields_metadata else None
-        add_field(field, ancestors=[], metadata=metadata, is_last=is_last, base_layer_idx=base_layer_idx)
+        add_field(field, ancestors=[], metadata=metadata, is_last=is_last, current_layer_idx=base_layer_idx)
 
     # Add remaining bytes if any (only if no filter or filter is None)
     if validation_result.remaining_bytes and filter_fields is None:
@@ -903,10 +919,16 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
 
         status = "OK" if field_result.is_valid else "ERR"
         hex_val = field_result.hex_value
+
+        # Show "(none)" for empty scalar fields (0 bytes) when decoding
+        # Lists should show "[0 items]" instead via format_decoded()
+        if decode and (not hex_val or len(hex_val) == 0) and not isinstance(field_result.decoded_value, list):
+            decoded = "(none)"
+        else:
+            decoded = format_decoded(field_result.decoded_value, field_result.hex_value, metadata)
+
         if field_bytes_limit > 0:
             hex_val = truncate_field_value(hex_val, field_bytes_limit)
-
-        decoded = format_decoded(field_result.decoded_value, field_result.hex_value, metadata)
 
         # Output this field if it's a leaf or has a simple value
         if not isinstance(field_result.decoded_value, dict):

@@ -1,0 +1,114 @@
+%YAML 1.2
+---
+name: Protococo
+file_extensions: [coco]
+scope: source.coco
+
+contexts:
+  main:
+    # Comments
+    - match: '#.*$'
+      scope: comment.line.number-sign.coco
+
+    - match: '//.*$'
+      scope: comment.line.double-slash.coco
+
+    # Keywords
+    - match: '\b(version|endian)\b'
+      scope: keyword.other.coco
+
+    - match: '\b(message|enum|layer)\b'
+      scope: keyword.declaration.coco
+
+    - match: '\b(extends|match)\b'
+      scope: keyword.control.coco
+
+    # Endianness constants
+    - match: '\b(be|le)\b'
+      scope: constant.language.endian.coco
+
+    # Primitive types
+    - match: '\b(u8|u16|u32|u64|i8|i16|i32|i64)\b'
+      scope: storage.type.numeric.coco
+
+    - match: '\b(bytes|string|pad)\b'
+      scope: storage.type.bytes.coco
+
+    - match: '\b(bits|bit)\b'
+      scope: storage.type.bitfield.coco
+
+    # String type modifiers
+    - match: '(string)(:)(cstr)\b'
+      captures:
+        1: storage.type.bytes.coco
+        2: punctuation.separator.coco
+        3: storage.modifier.coco
+
+    # Type endianness override (e.g., u16:le)
+    - match: '\b(u8|u16|u32|u64|i8|i16|i32|i64)(:)(be|le)\b'
+      captures:
+        1: storage.type.numeric.coco
+        2: punctuation.separator.coco
+        3: constant.language.endian.coco
+
+    # Display attributes [display: mac]
+    - match: '\[display:\s*(\w+)\]'
+      scope: meta.attribute.display.coco
+      captures:
+        1: entity.other.attribute-name.coco
+
+    # Enum values (EnumName.MEMBER)
+    - match: '\b([A-Z][A-Za-z0-9_]*)(\.)([A-Z_][A-Z0-9_]*)\b'
+      captures:
+        1: support.type.enum.coco
+        2: punctuation.accessor.coco
+        3: constant.other.enum-member.coco
+
+    # Numbers
+    - match: '\b0x[0-9A-Fa-f]+\b'
+      scope: constant.numeric.hex.coco
+
+    - match: '\b\d+(\.\d+)?\b'
+      scope: constant.numeric.decimal.coco
+
+    # Version number (e.g., 1.0)
+    - match: '(?<=version\s)\d+\.\d+'
+      scope: constant.numeric.version.coco
+
+    # Operators and punctuation
+    - match: '->'
+      scope: keyword.operator.arrow.coco
+
+    - match: '='
+      scope: keyword.operator.assignment.coco
+
+    - match: '\b_\b'
+      scope: constant.language.wildcard.coco
+
+    - match: '[+\-*/]'
+      scope: keyword.operator.arithmetic.coco
+
+    # Braces and brackets
+    - match: '\{'
+      scope: punctuation.section.block.begin.coco
+
+    - match: '\}'
+      scope: punctuation.section.block.end.coco
+
+    - match: '\['
+      scope: punctuation.section.brackets.begin.coco
+
+    - match: '\]'
+      scope: punctuation.section.brackets.end.coco
+
+    # Message/enum names (capitalized identifiers after keywords)
+    - match: '(?<=\b(message|enum|layer)\s+)([a-z_][a-z0-9_]*)\b'
+      scope: entity.name.type.coco
+
+    # Field names (lowercase identifiers followed by type or colon)
+    - match: '\b([a-z_][a-z0-9_]*)(?=\s*:|\s+[a-z_A-Z])'
+      scope: variable.other.member.coco
+
+    # Type references (after field names)
+    - match: '(?<=\s)([A-Z][A-Za-z0-9_]*)(?=\s|$|\[)'
+      scope: support.type.coco

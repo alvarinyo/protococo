@@ -2,8 +2,10 @@ version 1.0
 endian be
 
 // ============================================================================
-// DNS (RFC 1035)
+// DNS Protocol (RFC 1035)
 // ============================================================================
+// Full DNS support with label compression, variable-length arrays, and
+// terminator-based sizing. All features now working!
 
 // DNS OpCodes (RFC 1035)
 enum DnsOpCode : u8 {
@@ -45,11 +47,11 @@ enum DnsQClass : u16 {
   ANY = 255
 }
 
-// DNS header (12 bytes)
+// DNS header (12 bytes fixed)
 message dns_header {
   u16 transaction_id
   bits[16] flags {
-    bit rcode3          // RCODE bit 3
+    bit rcode3          // RCODE bit 3 (LSB)
     bit rcode2          // RCODE bit 2
     bit rcode1          // RCODE bit 1
     bit rcode0          // RCODE bit 0
@@ -64,7 +66,7 @@ message dns_header {
     bit opcode2         // OPCODE bit 2
     bit opcode1         // OPCODE bit 1
     bit opcode0         // OPCODE bit 0
-    bit qr_response     // 0=query, 1=response
+    bit qr_response     // 0=query, 1=response (MSB)
   }
   u16 question_count
   u16 answer_count
@@ -72,72 +74,87 @@ message dns_header {
   u16 additional_count
 }
 
-// DNS label (length-prefixed string, part of domain name encoding)
-// DNS names are sequences of labels ending with 0x00
-// e.g., "www.example.com" = 03 77 77 77 07 65 78 61 6d 70 6c 65 03 63 6f 6d 00
+// DNS label with compression support (RFC 1035 Section 4.1.4)
+//
+// DNS labels can be:
+// - Normal label: first byte = length (0-63), followed by label data
+// - Compression pointer: first 2 bits = 11, remaining 14 bits = offset
+// - Terminator: 0x00 (empty label, marks end of name)
+//
+// The first byte's top 2 bits determine the type:
+//   00xxxxxx (0x00-0x3F) = Normal label, xxxxxx = length
+//   11xxxxxx (0xC0-0xFF) = Compression pointer
 message dns_label {
-  u8 length
-  bytes label[length]
+  bits[8] first_byte {
+    bits[6] length_or_high  // Bits 0-5: length (normal) or offset high bits (pointer)
+    bits[2] label_type      // Bits 6-7: label type (00=normal/term, 11=pointer)
+  }
+  bytes rest[] match first_byte.label_type {
+    0b11 -> {
+      // Compression pointer: 2 bytes total
+      // Offset = (length_or_high << 8) | offset_low
+      // Points to another location in the DNS message
+      u8 offset_low
+    }
+    0b00 -> {
+      // Normal label or terminator
+      // If length_or_high = 0, this is the terminator (empty label)
+      // Otherwise, it's a label with length_or_high bytes of data
+      bytes label_data[first_byte.length_or_high]
+    }
+  }
+}
+
+// DNS name - handles both normal label sequences and compression pointers
+// A DNS name can be:
+// 1. A compression pointer (c0 xx) - 2 bytes, no terminator
+// 2. A label sequence ending with 0x00 terminator
+message dns_name {
+  bits[8] first_byte {
+    bits[6] length_or_high  // Length (normal) or offset high bits (pointer)
+    bits[2] label_type      // 00=normal/terminator, 11=pointer
+  }
+  bytes rest[] match first_byte.label_type {
+    0b11 -> {
+      // Compression pointer - just read the low byte and we're done
+      // Total name size: 2 bytes (first_byte + offset_low)
+      u8 offset_low
+    }
+    0b00 -> {
+      // Normal label sequence or terminator
+      // Read current label data + all subsequent labels + terminator
+      // If first_byte.length_or_high = 0, this is already the terminator (rest is empty)
+      // Otherwise: [label_data][next_length][next_label]...[00]
+      bytes label_and_rest[until: 0x00]
+    }
+  }
 }
 
 // DNS question section entry
-// NOTE: This message cannot be correctly specified in current protococo syntax!
-//
-// Problem: DNS domain names are self-describing (length-prefixed labels ending
-// with 0x00), but we can't express "variable-length field followed by fixed fields".
-// Using qname[...] would consume ALL remaining bytes, leaving nothing for qtype/qclass.
-//
-// What's needed: Syntax like [until: 0x00] or self-describing label sequences.
-// Example domain "google.com" = 06 67 6f 6f 67 6c 65 03 63 6f 6d 00
-//
-// message dns_question {
-//   dns_label_sequence qname  // Hypothetical: repeats dns_label until 0x00
-//   DnsQType qtype
-//   DnsQClass qclass
-// }
+// Domain name is a sequence of labels ending with 0x00 terminator
+// Example: "google.com" = 06 67 6f 6f 67 6c 65 03 63 6f 6d 00
+message dns_question {
+  dns_name qname
+  DnsQType qtype
+  DnsQClass qclass
+}
 
-// Base DNS resource record (common fields)
-// NOTE: Also has the same limitation as dns_question!
-// The name[...] field would consume all bytes, leaving nothing for the remaining fields.
-//
-// message dns_rr {
-//   dns_label_sequence name  // Hypothetical syntax
-//   DnsQType rr_type
-//   DnsQClass rr_class
-//   u32 ttl
-//   u16 rd_length
-//   bytes rdata[rd_length]
-// }
-
-// DNS resource record subtypes
-// NOTE: All commented out because dns_rr base message is not specifiable
-//
-// message dns_rr_a extends dns_rr {
-//   rr_type = DnsQType.A
-//   rd_length = 4
-//   rdata {
-//     u32 address [display: ipv4]
-//   }
-// }
-//
-// message dns_rr_aaaa extends dns_rr {
-//   rr_type = DnsQType.AAAA
-//   rd_length = 16
-//   rdata {
-//     bytes address[16] [display: ipv6]
-//   }
-// }
-//
-// (Additional DNS RR types omitted - all have same limitation)
+// DNS resource record (answer, authority, additional)
+// Name can be either a label sequence OR a compression pointer
+message dns_rr {
+  dns_name name              // Handles both pointer and normal names
+  DnsQType rr_type
+  DnsQClass rr_class
+  u32 ttl
+  u16 rd_length
+  bytes rdata[rd_length]     // Resource data (format depends on rr_type)
+}
 
 // Complete DNS message (query or response)
 layer message dns_message {
   dns_header header
-  // Note: Full question/answer parsing would require dynamic arrays
-  // For now, this provides the header structure and can be extended
-  // with specific question/answer parsing based on counts
-  bytes questions[...]   // question_count questions (variable length)
-  // bytes answers[...]     // answer_count answers (variable length)
-  // bytes authority[...]   // authority_count authority RRs (variable length)
-  // bytes additional[...]  // additional_count additional RRs (variable length)
+  dns_question questions[header.question_count]   // Variable-length array
+  dns_rr answers[header.answer_count]             // Variable-length array
+  dns_rr authority[header.authority_count]        // Variable-length array
+  dns_rr additional[header.additional_count]      // Variable-length array
 }

@@ -12,7 +12,7 @@ from coco_ast import (
     CocoFile, Message, Field,
     IntegerType, BytesType, StringType, PadType, BitFieldType,
     EnumTypeRef,
-    LiteralSize, FieldRefSize, VariableSize, GreedySize, FillToSize, SizeExpr,
+    LiteralSize, FieldRefSize, VariableSize, GreedySize, FillToSize, UntilSize, SizeExpr,
     Endianness,
 )
 
@@ -282,12 +282,42 @@ class Encoder:
             raise ValueError(f"Unknown type: {field_type.enum_name}")
 
         elif isinstance(field_type, BytesType):
+            hex_value = None
             if isinstance(value, bytes):
-                return value.hex()
+                hex_value = value.hex()
             elif isinstance(value, str):
                 # Assume hex string
-                return value.lower().replace(" ", "")
-            return str(value)
+                hex_value = value.lower().replace(" ", "")
+            else:
+                hex_value = str(value)
+
+            # Special handling for UntilSize - ensure terminator is present
+            if isinstance(field.size, UntilSize):
+                # Evaluate terminator value
+                from coco_ast import EnumValue
+                term_val = field.size.terminator
+                if isinstance(term_val, EnumValue):
+                    # Look up enum value
+                    enum_def = self.get_enum(term_val.enum_name)
+                    if enum_def:
+                        member = enum_def.get_member_by_name(term_val.member_name)
+                        if member:
+                            terminator_value = member.value
+                        else:
+                            raise ValueError(f"Unknown enum member: {term_val.enum_name}.{term_val.member_name}")
+                    else:
+                        raise ValueError(f"Unknown enum: {term_val.enum_name}")
+                elif isinstance(term_val, int):
+                    terminator_value = term_val
+                else:
+                    raise ValueError(f"Unsupported terminator type: {type(term_val)}")
+
+                # Ensure the hex value ends with the terminator
+                terminator_hex = f"{terminator_value & 0xFF:02x}"
+                if not hex_value.endswith(terminator_hex):
+                    hex_value += terminator_hex
+
+            return hex_value
 
         elif isinstance(field_type, StringType):
             if isinstance(value, str):
