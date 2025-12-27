@@ -51,22 +51,14 @@ enum DnsQClass : u16 {
 message dns_header {
   u16 transaction_id
   bits[16] flags {
-    bit rcode3          // RCODE bit 3 (LSB)
-    bit rcode2          // RCODE bit 2
-    bit rcode1          // RCODE bit 1
-    bit rcode0          // RCODE bit 0
-    bit checking_disabled
-    bit authenticated_data
-    bit z_reserved
-    bit recursion_available
-    bit recursion_desired
-    bit truncated
-    bit authoritative
-    bit opcode3         // OPCODE bit 3
-    bit opcode2         // OPCODE bit 2
-    bit opcode1         // OPCODE bit 1
-    bit opcode0         // OPCODE bit 0
     bit qr_response     // 0=query, 1=response (MSB)
+    bits[4] opcode
+    bit authoritative
+    bit truncated
+    bit recursion_desired
+    bit recursion_available
+    bits[3] z_reserved
+    bits[4] rcode       // RCODE (LSB)
   }
   u16 question_count
   u16 answer_count
@@ -74,58 +66,28 @@ message dns_header {
   u16 additional_count
 }
 
-// DNS label with compression support (RFC 1035 Section 4.1.4)
-//
-// DNS labels can be:
-// - Normal label: first byte = length (0-63), followed by label data
-// - Compression pointer: first 2 bits = 11, remaining 14 bits = offset
-// - Terminator: 0x00 (empty label, marks end of name)
-//
-// The first byte's top 2 bits determine the type:
-//   00xxxxxx (0x00-0x3F) = Normal label, xxxxxx = length
-//   11xxxxxx (0xC0-0xFF) = Compression pointer
-message dns_label {
-  bits[8] first_byte {
-    bits[6] length_or_high  // Bits 0-5: length (normal) or offset high bits (pointer)
-    bits[2] label_type      // Bits 6-7: label type (00=normal/term, 11=pointer)
-  }
-  bytes rest[] match first_byte.label_type {
-    0b11 -> {
-      // Compression pointer: 2 bytes total
-      // Offset = (length_or_high << 8) | offset_low
-      // Points to another location in the DNS message
-      u8 offset_low
-    }
-    0b00 -> {
-      // Normal label or terminator
-      // If length_or_high = 0, this is the terminator (empty label)
-      // Otherwise, it's a label with length_or_high bytes of data
-      bytes label_data[first_byte.length_or_high]
-    }
-  }
-}
-
 // DNS name - handles both normal label sequences and compression pointers
 // A DNS name can be:
-// 1. A compression pointer (c0 xx) - 2 bytes, no terminator
+// 1. A compression pointer (c0 xx) - 2 bytes total, jumps to another location
 // 2. A label sequence ending with 0x00 terminator
 message dns_name {
-  bits[8] first_byte {
-    bits[6] length_or_high  // Length (normal) or offset high bits (pointer)
-    bits[2] label_type      // 00=normal/terminator, 11=pointer
-  }
-  bytes rest[] match first_byte.label_type {
+  bits[2] label_type
+  match label_type {
     0b11 -> {
-      // Compression pointer - just read the low byte and we're done
-      // Total name size: 2 bytes (first_byte + offset_low)
-      u8 offset_low
+      // Compression pointer: 14 bits of offset remaining
+      bits[14] pointer_offset [offset_of: dns_name]
     }
     0b00 -> {
-      // Normal label sequence or terminator
-      // Read current label data + all subsequent labels + terminator
-      // If first_byte.length_or_high = 0, this is already the terminator (rest is empty)
-      // Otherwise: [label_data][next_length][next_label]...[00]
-      bytes label_and_rest[until: 0x00]
+      // Normal label or terminator: 6 bits of length remaining
+      bits[6] label_length
+      match label_length {
+        0 -> {} // Terminator - name ends here
+        _ -> {
+          // Label with data followed by next name part
+          bytes label_data[label_length]
+          dns_name next
+        }
+      }
     }
   }
 }

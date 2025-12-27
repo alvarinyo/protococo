@@ -13,11 +13,13 @@ layer message udp_datagram {
   u16 dst_port [display: port]
   u16 length
   u16 checksum
-  bytes data[length - 8] match dst_port {
+  bytes payload[length - 8] match src_port {
     53 -> dns_message dns
-    _ -> bytes payload[] match src_port {
-      53 -> dns_message dns
-      _ -> {}
+    _ -> {
+      match dst_port {
+        53 -> dns_message dns
+        _ -> {}
+      }
     }
   }
 }

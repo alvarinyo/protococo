@@ -193,6 +193,16 @@ class BranchDeterminedSize:
     pass
 
 
+@dataclass
+class OffsetSpec:
+    """Wrapper for offset specifications to distinguish from size specs.
+
+    Contains the actual offset expression (LiteralSize, FieldRefSize, or SizeExpr).
+    Used internally by the parser to differentiate @ offset from [size].
+    """
+    expr: 'SizeSpec'
+
+
 SizeSpec = LiteralSize | FieldRefSize | VariableSize | GreedySize | SizeExpr | FillToSize | UntilSize | BranchDeterminedSize | None
 
 
@@ -209,9 +219,10 @@ class EnumValue:
 
 @dataclass
 class FieldAttributes:
-    """Field metadata: [display: hex, doc: "description"]"""
+    """Field metadata: [display: hex, doc: "description", offset_of: type_name]"""
     display: DisplayFormat | None = None
     doc: str | None = None
+    offset_of: str | None = None  # Type name this offset points to
 
 
 # === Match Branches ===

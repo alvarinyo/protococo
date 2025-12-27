@@ -13,17 +13,17 @@ include "icmp.coco"
 // IPv4 header (20 bytes minimum, no options)
 message ipv4_header {
   bits[8] version_ihl {
-    bits[4] ihl
     bits[4] version
+    bits[4] ihl
   }
   u8 dscp_ecn
   u16 total_length
   u16 identification
   bits[16] flags_fragment {
-    bits[13] fragment_offset
-    bit more_fragments      // MF flag
-    bit dont_fragment       // DF flag
-    bit reserved
+    bit reserved            // MSB
+    bit dont_fragment
+    bit more_fragments
+    bits[13] fragment_offset // LSB
   }
   u8 ttl
   Protocol protocol

@@ -48,25 +48,23 @@ message tcp_option {
 }
 
 // TCP segment (RFC 793)
-// Bytes 12-13 contain data_offset (4b) + reserved (4b) + flags (8b) = 16 bits
+// Bytes 12-13 contain data_offset (4b) + reserved (6b) + flags (6b) = 16 bits
 layer message tcp_segment {
   u16 src_port [display: port]
   u16 dst_port [display: port]
   u32 seq_num
   u32 ack_num
   bits[16] data_offset_flags {
-    // Flags (low 8 bits) - bit 0 is fin, bit 7 is cwr
-    bit fin
-    bit syn
-    bit rst
-    bit psh
-    bit ack
-    bit urg
-    bit ece
-    bit cwr
-    // Reserved and data offset (high 8 bits)
+    bits[4] data_offset    // MSB
     bits[4] reserved
-    bits[4] data_offset
+    bit cwr
+    bit ece
+    bit urg
+    bit ack
+    bit psh
+    bit rst
+    bit syn
+    bit fin                // LSB
   }
   u16 window
   u16 checksum

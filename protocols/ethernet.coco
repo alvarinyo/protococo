@@ -27,9 +27,9 @@ message ethernet_header {
 // 802.1Q VLAN frame (tag + inner payload)
 layer message vlan_frame {
   bits[16] tci {
-    bits[12] vlan_id
+    bits[3] pcp           // MSB: Priority Code Point
     bit dei               // Drop Eligible Indicator
-    bits[3] pcp           // Priority Code Point
+    bits[12] vlan_id      // LSB: VLAN ID
   }
   EtherType inner_ethertype
   bytes inner[] match inner_ethertype {

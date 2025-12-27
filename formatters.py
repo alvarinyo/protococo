@@ -16,7 +16,7 @@ Built-in formatters:
 Future: Python plugin system will load custom formatters from a directory.
 """
 
-from typing import Callable
+from typing import Callable, Any
 
 # Type for formatter functions: (hex_string, byte_count, endian) -> formatted_string
 FormatterFunc = Callable[[str, int, str], str]
@@ -38,22 +38,21 @@ def get_formatter(name: str) -> FormatterFunc | None:
     return _formatters.get(name)
 
 
-def format_value(name: str, hex_value: str, endian: str = "be") -> str | None:
-    """Format a hex value using a named formatter.
-
-    Args:
-        name: Formatter name (e.g., "ipv4", "mac")
-        hex_value: Hex string to format
-        endian: Endianness ("be" or "le")
-
-    Returns:
-        Formatted string, or None if formatter not found
-    """
+def format_value(name: str, hex_value: str, endian: str = "be", decoded_value: Any = None) -> str | None:
+    """Format a value using a named formatter."""
     formatter = get_formatter(name)
     if formatter is None:
         return None
     byte_count = len(hex_value) // 2
-    return formatter(hex_value, byte_count, endian)
+    
+    # Built-in formatters (except dnsname) expect hex strings.
+    # dnsname expects the decoded dict.
+    if name == "dnsname":
+        val_to_format = decoded_value if decoded_value is not None else hex_value
+    else:
+        val_to_format = hex_value
+        
+    return formatter(val_to_format, byte_count, endian)
 
 
 def list_formatters() -> list[str]:
@@ -149,40 +148,62 @@ def format_ascii(hex_value: str, byte_count: int, endian: str) -> str:
 
 
 @register("dnsname")
-def format_dnsname(hex_value: str, byte_count: int, endian: str) -> str:
-    """Format DNS name labels as dot-separated string."""
-    try:
-        raw_bytes = bytes.fromhex(hex_value)
+def format_dnsname(value: Any, byte_count: int, endian: str) -> str:
+    """Format DNS name labels from the new flattened bit-stream structure."""
+    if not isinstance(value, dict):
+        return str(value)
+
+    def extract_val(v):
+        from analyzer import FieldValue
+        if isinstance(v, FieldValue):
+            return v.val
+        return v
+
+    def resolve_name(d: dict) -> list[str]:
+        if not d:
+            return []
+
         labels = []
-        i = 0
-        while i < len(raw_bytes):
-            b = raw_bytes[i]
-            if b == 0:  # Terminator
-                break
-            if (b & 0xC0) == 0xC0:  # Compression pointer
-                if i + 1 < len(raw_bytes):
-                    offset = ((b & 0x3F) << 8) | raw_bytes[i+1]
-                    labels.append(f"[ptr:{offset}]")
-                    i += 2
-                else:
-                    labels.append("[err]")
-                    break
-                # Pointer ends the name
-                break
-            else:  # Normal label
-                length = b
-                if i + 1 + length <= len(raw_bytes):
-                    label = raw_bytes[i+1 : i+1+length].decode('ascii', errors='replace')
-                    labels.append(label)
-                    i += 1 + length
-                else:
-                    labels.append("[err]")
-                    break
-        
-        result = ".".join(labels)
-        return f'{hex_value} ("{result}")'
-    except Exception:
-        return hex_value
+
+        # Detect pointer vs label by presence of pointer_offset (since label_type may be missing when promoted)
+        if "pointer_offset" in d:
+            # Compression pointer
+            offset = extract_val(d.get("pointer_offset", 0))
+            # Check for resolved pointer (offset_of attribute)
+            resolved = extract_val(d.get("pointer_offset_resolved"))
+            if resolved and isinstance(resolved, dict):
+                # Recursively resolve the pointed-to name
+                return resolve_name(resolved)
+            else:
+                labels.append(f"[ptr:{offset}]")
+        elif "label_data" in d:
+            # Normal label with data
+            data_bytes = extract_val(d.get("label_data", ""))
+            if isinstance(data_bytes, str):
+                try:
+                    # Convert hex to ASCII
+                    text = bytes.fromhex(data_bytes).decode('ascii', errors='replace')
+                    labels.append(text)
+                except:
+                    labels.append(data_bytes)
+
+            # Process next label
+            next_label = extract_val(d.get("next"))
+            if next_label and isinstance(next_label, dict):
+                labels.extend(resolve_name(next_label))
+        else:
+            # Terminator or unknown
+            pass
+
+        return labels
+
+    try:
+        parts = resolve_name(value)
+        if not parts:
+            return "(root)"
+        return ".".join(parts)
+    except Exception as e:
+        return str(value)
 
 
 # Well-known port names (common ports)

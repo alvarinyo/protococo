@@ -73,14 +73,22 @@ class CocoTransformer(Transformer):
         Raises:
             ValueError: If bare [] is used without match clause
         """
+        if size is None:
+            # Missing size spec - keep as None (means one instance or greedy depending on type)
+            return None
+
         if isinstance(size, VariableSize):
-            if match_clause is None:
-                raise ValueError(
-                    f"Field '{field_name}': Bare [] requires a match clause. "
-                    f"Use [...] for greedy matching or add a match clause."
-                )
-            # Convert VariableSize to BranchDeterminedSize when used with match
+            # Bare [] - requires match clause unless it's greedy (handled in engine)
+            if match_clause:
+                return BranchDeterminedSize()
+            
+            # For now, we allow bare [] as Greedy for backward compatibility,
+            # but we should probably encourage [...]
+            return size
+
+        if isinstance(size, GreedySize) and match_clause:
             return BranchDeterminedSize()
+            
         return size
 
     # === Header ===
@@ -210,7 +218,15 @@ class CocoTransformer(Transformer):
         return (first, None)
 
     def message_item(self, items):
-        return items[0]
+        item = items[0]
+        if isinstance(item, MatchClause):
+            # Standalone match clause: wrap in a virtual field
+            return Field(
+                name="_",  # Anonymous
+                type=None,
+                match_clause=item
+            )
+        return item
 
     def typed_field_def(self, items):
         """Handle field with type reference: TypeName field_name ..."""
@@ -294,8 +310,11 @@ class CocoTransformer(Transformer):
 
     def size_value(self, items):
         if len(items) == 0:
-            return VariableSize()
+            return VariableSize()  # Bare [] explicitly means Variable/Greedy
         val = items[0]
+        # Handle branch-determined size: [*] (BRANCH_SIZE token)
+        if isinstance(val, Token) and (val.type == 'BRANCH_SIZE' or str(val) == "*"):
+            return BranchDeterminedSize()
         # Handle greedy size: [...] (GREEDY_SIZE token)
         if isinstance(val, Token) and (val.type == 'GREEDY_SIZE' or str(val) == "..."):
             return GreedySize()
@@ -362,8 +381,15 @@ class CocoTransformer(Transformer):
         # items[0] is already a string from IDENT
         return DisplayFormat(name=str(items[0]))
 
+    def offset_of_attr(self, items):
+        # items[0] is the type name (IDENT)
+        return ("offset_of", str(items[0]))
+
     def attribute(self, items):
         if len(items) == 1:
+            # offset_of_attr returns a tuple directly, pass it through
+            if isinstance(items[0], tuple):
+                return items[0]
             # doc attribute
             if isinstance(items[0], str):
                 return ("doc", items[0])
@@ -380,6 +406,8 @@ class CocoTransformer(Transformer):
                     attrs.display = val
                 elif key == "doc":
                     attrs.doc = val
+                elif key == "offset_of":
+                    attrs.offset_of = val
         return attrs
 
     # === Match ===
@@ -419,10 +447,16 @@ class CocoTransformer(Transformer):
         branches = items[1]
         return MatchClause(discriminator=discriminator, branches=branches)
 
+    def offset_spec(self, items):
+        """Handle offset specification: @ size_expr"""
+        from coco_ast import OffsetSpec
+        return OffsetSpec(expr=self._to_size_spec(items[0]))
+
     # === Fields ===
 
     def int_field(self, items):
         """Handle integer field: u8/u16/... field_name ..."""
+        from coco_ast import OffsetSpec
         int_type = items[0]  # from integer_type
         idx = 1
         endian = None
@@ -434,6 +468,7 @@ class CocoTransformer(Transformer):
         idx += 1
 
         default = None
+        offset = None
         match = None
         attrs = None
         for item in items[idx:]:
@@ -441,6 +476,8 @@ class CocoTransformer(Transformer):
                 match = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
+            elif isinstance(item, OffsetSpec):
+                offset = item.expr
             elif item is not None:
                 default = item
 
@@ -448,6 +485,7 @@ class CocoTransformer(Transformer):
             name=name,
             type=IntegerType(base=int_type, endian=endian),
             size=None,
+            offset=offset,
             default_value=default,
             match_clause=match,
             attributes=attrs,
@@ -455,17 +493,21 @@ class CocoTransformer(Transformer):
 
     def bytes_field(self, items):
         """Handle bytes field: bytes field_name[size] ..."""
+        from coco_ast import OffsetSpec
         # items[0] is "bytes" keyword (already processed)
         name = items[1]
         idx = 2
 
         size = None
         default = None
+        offset = None
         match = None
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
+            if isinstance(item, OffsetSpec):
+                offset = item.expr
+            elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -481,6 +523,7 @@ class CocoTransformer(Transformer):
             name=name,
             type=BytesType(),
             size=size,
+            offset=offset,
             default_value=default,
             match_clause=match,
             attributes=attrs,
@@ -488,6 +531,7 @@ class CocoTransformer(Transformer):
 
     def string_field(self, items):
         """Handle string field: string[:cstr] field_name[size] ..."""
+        from coco_ast import OffsetSpec
         # items[0] is "string" keyword
         idx = 1
         is_cstr = False
@@ -500,11 +544,14 @@ class CocoTransformer(Transformer):
 
         size = None
         default = None
+        offset = None
         match = None
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
+            if isinstance(item, OffsetSpec):
+                offset = item.expr
+            elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -520,6 +567,7 @@ class CocoTransformer(Transformer):
             name=name,
             type=StringType(is_cstr=is_cstr),
             size=size,
+            offset=offset,
             default_value=default,
             match_clause=match,
             attributes=attrs,
@@ -527,15 +575,19 @@ class CocoTransformer(Transformer):
 
     def pad_field(self, items):
         """Handle pad field: pad[size] = value"""
+        from coco_ast import OffsetSpec
         # items[0] is "pad" keyword
         idx = 1
 
         size = None
         default = None
+        offset = None
         attrs = None
 
         for item in items[idx:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
+            if isinstance(item, OffsetSpec):
+                offset = item.expr
+            elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
@@ -549,6 +601,7 @@ class CocoTransformer(Transformer):
             name="_pad",  # Anonymous padding
             type=PadType(),
             size=size,
+            offset=offset,
             default_value=default,
             attributes=attrs,
         )
@@ -575,6 +628,7 @@ class CocoTransformer(Transformer):
 
     def bitfield(self, items):
         """Handle bitfield: bits[N] field_name { ... } match ..."""
+        from coco_ast import OffsetSpec
         # items[0] is BitFieldType (with bit_count from parsing)
         bitfield_type = items[0]
         name = items[1]
@@ -582,6 +636,7 @@ class CocoTransformer(Transformer):
 
         body = None
         match = None
+        offset = None
         attrs = None
 
         for item in items[idx:]:
@@ -589,6 +644,8 @@ class CocoTransformer(Transformer):
                 body = item
             elif isinstance(item, MatchClause):
                 match = item
+            elif isinstance(item, OffsetSpec):
+                offset = item.expr
             elif isinstance(item, FieldAttributes):
                 attrs = item
 
@@ -596,22 +653,27 @@ class CocoTransformer(Transformer):
             name=name,
             type=bitfield_type,
             bitfield_body=body,
+            offset=offset,
             match_clause=match,
             attributes=attrs,
         )
 
     def typed_field(self, items):
         """Handle field with type reference: TypeName field_name ..."""
+        from coco_ast import OffsetSpec
         type_name = items[0]  # IDENT for type
         field_name = items[1]  # IDENT for field
 
         size = None
         default = None
+        offset = None
         match = None
         attrs = None
 
         for item in items[2:]:
-            if isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
+            if isinstance(item, OffsetSpec):
+                offset = item.expr
+            elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
                 size = item
             elif isinstance(item, MatchClause):
                 match = item
@@ -627,6 +689,7 @@ class CocoTransformer(Transformer):
             name=field_name,
             type=EnumTypeRef(enum_name=type_name),
             size=size,
+            offset=offset,
             default_value=default,
             match_clause=match,
             attributes=attrs,
@@ -696,6 +759,42 @@ class CocoTransformer(Transformer):
 
     # === Start ===
 
+    def _get_all_fields_recursive(self, fields: list[Field]) -> list[Field]:
+        """Recursively collect all fields including those in match clauses and structure bodies."""
+        all_fields = []
+        for field in fields:
+            all_fields.append(field)
+
+            # Check structure_body
+            if field.structure_body:
+                all_fields.extend(self._get_all_fields_recursive(field.structure_body))
+
+            # Check match_clause branches
+            if field.match_clause:
+                for branch in field.match_clause.branches:
+                    if branch.fields:
+                        all_fields.extend(self._get_all_fields_recursive(branch.fields))
+
+            # Check bitfield_body
+            if field.bitfield_body:
+                # Bitfields don't have nested fields with attributes, skip
+                pass
+
+        return all_fields
+
+    def _validate_offset_of_in_message(self, msg: Message, coco_file: CocoFile):
+        """Recursively validate offset_of attributes in message fields."""
+        all_fields = self._get_all_fields_recursive(msg.fields)
+
+        for field in all_fields:
+            if field.attributes and field.attributes.offset_of:
+                type_name = field.attributes.offset_of
+                # Check if type exists as message or enum
+                if not coco_file.get_message(type_name) and not coco_file.get_enum(type_name):
+                    raise ParseError(
+                        f"Unknown type '{type_name}' in offset_of attribute for field '{field.name}'"
+                    )
+
     def start(self, items):
         header = items[0]
 
@@ -712,7 +811,7 @@ class CocoTransformer(Transformer):
         enums = [d for d in definitions if isinstance(d, EnumDef)]
         messages = [d for d in definitions if isinstance(d, Message)]
 
-        return CocoFile(
+        coco_file = CocoFile(
             version=header.get("version", "1.0"),
             endian=header.get("endian", Endianness.LITTLE),
             constants=constants,
@@ -720,6 +819,12 @@ class CocoTransformer(Transformer):
             messages=messages,
             includes=includes,
         )
+
+        # Validate offset_of attributes reference valid types
+        for msg in messages:
+            self._validate_offset_of_in_message(msg, coco_file)
+
+        return coco_file
 
 
 # Global parser instance
