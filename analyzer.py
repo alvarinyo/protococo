@@ -578,7 +578,7 @@ class Decoder:
                 errors=errors
             )
 
-        # Special handling for branch-determined size [*]
+        # Special handling for branch-determined size []
         if isinstance(field.size, BranchDeterminedSize):
             if not field.match_clause:
                 return DecodeResult(
@@ -993,9 +993,11 @@ class Decoder:
                         if isinstance(actual_val, dict): self._flatten_to_context(sub_name, actual_val, context)
                         results_list.append(DecodeResult(name=sub_name, hex_value=sub_val.hex if isinstance(sub_val, FieldValue) else "", decoded_value=actual_val, is_valid=True))
                 else:
-                    # Match clause exists but no promoted fields - add base field
-                    result_dict[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
-                    results_list.append(decode_result)
+                    # Match clause exists but no promoted fields
+                    # Skip adding base field for branch-determined size [] to remain transparent
+                    if not isinstance(field.size, BranchDeterminedSize):
+                        result_dict[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
+                        results_list.append(decode_result)
             else:
                 # No match: add the field normally
                 result_dict[field.name] = FieldValue(decode_result.hex_value, decode_result.decoded_value)
@@ -1074,10 +1076,14 @@ class Decoder:
             try: self.data = bytes.fromhex(hex_str)
             except ValueError: self.data = b""
             self.bit_offset = 0
+            # Reset state for fresh validation
+            self.layer_stack = [0]
+            self.jump_depth = 0
+            self.jumped_offsets = set()
+        
         if not self.layer_stack:
             self.layer_stack = [0]
-        self.jump_depth = 0
-        self.jumped_offsets = set()
+            
         fields = self.resolve_message(msg)
         
         self._protocol_chain = []

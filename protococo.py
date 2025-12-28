@@ -276,7 +276,7 @@ def validation_result_to_tuple(result: ValidationResult, fields_metadata: dict =
             if decode and metadata:
                 if metadata.attributes and metadata.attributes.display:
                     fmt_name = metadata.attributes.display.name
-                    formatted = formatters.format_value(fmt_name, hex_val)
+                    formatted = formatters.format_value(fmt_name, hex_val, decoded_value=actual_val)
                     if formatted:
                         result[k] = formatted
                         continue
@@ -340,7 +340,7 @@ def validation_result_to_tuple(result: ValidationResult, fields_metadata: dict =
                 metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path)
                 if metadata and metadata.attributes and metadata.attributes.display:
                     fmt_name = metadata.attributes.display.name
-                    formatted = formatters.format_value(fmt_name, hex_val)
+                    formatted = formatters.format_value(fmt_name, hex_val, decoded_value=actual_val)
                     if formatted:
                         validation_decoded_dict[field_path] = formatted
                         continue
@@ -758,7 +758,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         else:
             nested_content_layer = content_layer_idx
 
-        # Check if this field uses branch-determined size [*] and should be flattened
+        # Check if this field uses branch-determined size [] and should be flattened
         from coco_ast import BranchDeterminedSize
         is_branch_determined = metadata and isinstance(getattr(metadata, 'size', None), BranchDeterminedSize)
 
@@ -878,7 +878,7 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 actual_val = v
 
             if isinstance(actual_val, dict):
-                # Check if this field uses branch-determined size [*] and should be flattened
+                # Check if this field uses branch-determined size [] and should be flattened
                 from coco_ast import BranchDeterminedSize
                 # Strip array indices from field_path for metadata lookup
                 # e.g., "options[0].rest" -> "options.rest"
@@ -997,12 +997,65 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
     return "\n".join(lines)
 
 
-def get_message_explanation_string_porcelain(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32, message_name: str = None):
-    """Format validation result as porcelain (machine-readable, space-padded columns).
+def get_message_explanation_string_json(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, field_bytes_limit: int = 32):
+    """Format validation result as a JSON string."""
+    def serialize_val(val, hex_val=None, field_path=""):
+        if isinstance(val, FieldValue):
+            return serialize_val(val.val, val.hex, field_path)
+        
+        # Apply display formatter if decode=True (check before recursing into dicts)
+        if decode and fields_metadata and hex_val:
+            field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+            metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path)
+            if metadata and metadata.attributes and metadata.attributes.display:
+                fmt_name = metadata.attributes.display.name
+                formatted = formatters.format_value(fmt_name, hex_val, decoded_value=val)
+                if formatted:
+                    return formatted
 
-    Format: STATUS  PATH  HEX  DECODED
-    STATUS is OK or ERR
-    Columns are space-padded for alignment. No colors, easy to parse.
+        if isinstance(val, dict):
+            return {k: serialize_val(v, field_path=f"{field_path}.{k}" if field_path else k) for k, v in val.items()}
+        
+        if isinstance(val, list):
+            return [serialize_val(v, field_path=f"{field_path}[{i}]") for i, v in enumerate(val)]
+
+        # Apply truncation if field_bytes_limit > 0
+        if field_bytes_limit > 0 and isinstance(val, str) and not (decode and val.startswith("0x")):
+            # Don't truncate if it looks like an enum already formatted
+            if not ("." in val and not val.startswith("0x")):
+                return truncate_field_value(val, field_bytes_limit)
+
+        return val
+
+    data = {
+        "message_name": validation_result.message_name,
+        "is_valid": validation_result.is_valid,
+        "protocol_chain": validation_result.protocol_chain,
+        "fields": []
+    }
+
+    for field in validation_result.fields:
+        field_data = {
+            "name": field.name,
+            "hex": truncate_field_value(field.hex_value, field_bytes_limit) if field_bytes_limit > 0 else field.hex_value,
+            "is_valid": field.is_valid,
+            "decoded": serialize_val(field.decoded_value, field.hex_value, field.name)
+        }
+        if field.errors:
+            field_data["errors"] = field.errors
+        data["fields"].append(field_data)
+
+    if validation_result.remaining_bytes:
+        data["remaining_bytes"] = truncate_field_value(validation_result.remaining_bytes, field_bytes_limit) if field_bytes_limit > 0 else validation_result.remaining_bytes
+
+    return json.dumps(data, indent=2)
+
+
+def get_message_explanation_string_porcelain(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, filter_fields=None, coco_file=None, field_bytes_limit: int = 32, message_name: str = None):
+    """Format validation result as porcelain (machine-readable, tab-separated columns).
+
+    Format: STATUS\tPATH\tHEX\tDECODED
+    STATUS is OK or ERR. Empty values are represented by a hyphen '-'.
     """
     # Collect rows as tuples: (status, path, hex, decoded)
     rows = []
@@ -1010,14 +1063,14 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
     # Add message name header row if provided
     if message_name:
         status = "OK" if validation_result.is_valid else "ERR"
-        rows.append((status, message_name, "", ""))
+        rows.append((status, message_name, "-", "-"))
 
     def format_decoded(value, hex_val: str, metadata=None) -> str:
         """Format decoded value for display."""
-        if value is None:
-            return ""
+        if not decode or value is None:
+            return "-"
         if isinstance(value, dict):
-            return ""  # Nested structures handled separately
+            return "-"  # Nested structures handled separately
         if isinstance(value, list):
             return f"[{len(value)} items]"
 
@@ -1034,7 +1087,7 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
         if field_bytes_limit > 0:
             result = truncate_field_value(result, field_bytes_limit)
 
-        return result
+        return result if result else "-"
 
     def flatten_field(field_result: DecodeResult, path: str = "", metadata=None):
         """Recursively flatten a field result into lines."""
@@ -1049,17 +1102,27 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
                     return
 
         status = "OK" if field_result.is_valid else "ERR"
-        hex_val = field_result.hex_value
+        hex_val = field_result.hex_value if field_result.hex_value else "-"
 
         # Show "(none)" for empty scalar fields (0 bytes) when decoding
         # Lists should show "[0 items]" instead via format_decoded()
-        if decode and (not hex_val or len(hex_val) == 0) and not isinstance(field_result.decoded_value, list):
+        if decode and (not field_result.hex_value or len(field_result.hex_value) == 0) and not isinstance(field_result.decoded_value, list):
             decoded = "(none)"
         else:
             decoded = format_decoded(field_result.decoded_value, field_result.hex_value, metadata)
 
-        if field_bytes_limit > 0:
+        if field_bytes_limit > 0 and hex_val != "-":
             hex_val = truncate_field_value(hex_val, field_bytes_limit)
+
+        # Check if this structured field has a display formatter
+        if decode and metadata:
+            if metadata.attributes and metadata.attributes.display:
+                fmt_name = metadata.attributes.display.name
+                original_hex = field_result.hex_value
+                formatted = formatters.format_value(fmt_name, original_hex, decoded_value=field_result.decoded_value)
+                if formatted:
+                    rows.append((status, field_path, hex_val, formatted))
+                    return
 
         # Output this field if it's a leaf or has a simple value
         if not isinstance(field_result.decoded_value, dict):
@@ -1089,46 +1152,56 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
                 hex_val = str(v) if not isinstance(v, (dict, list)) else ""
                 actual_val = v
 
+            status = "OK" if parent_valid else "ERR"
+
             if isinstance(actual_val, dict):
+                # Check if this structured field has a display formatter
+                if decode and fields_metadata:
+                    field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+                    metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
+                    if metadata and metadata.attributes and metadata.attributes.display:
+                        fmt_name = metadata.attributes.display.name
+                        formatted = formatters.format_value(fmt_name, hex_val, decoded_value=actual_val)
+                        if formatted:
+                            rows.append((status, field_path, hex_val if hex_val else "-", formatted))
+                            continue
+                
                 flatten_dict(actual_val, field_path, parent_valid)
             elif isinstance(actual_val, list):
-                status = "OK" if parent_valid else "ERR"
-                rows.append((status, field_path, "", f"[{len(actual_val)} items]"))
+                rows.append((status, field_path, "-", f"[{len(actual_val)} items]"))
                 for i, item in enumerate(actual_val):
                     item_path = f"{field_path}[{i}]"
                     if isinstance(item, dict):
                         flatten_dict(item, item_path, parent_valid)
                     elif isinstance(item, FieldValue):
                         item_hex = truncate_field_value(item.hex, field_bytes_limit) if field_bytes_limit > 0 else item.hex
-                        item_val = str(item.val)
-                        if field_bytes_limit > 0:
+                        item_val = str(item.val) if decode else "-"
+                        if decode and field_bytes_limit > 0:
                             item_val = truncate_field_value(item_val, field_bytes_limit)
-                        rows.append((status, item_path, item_hex, item_val))
+                        rows.append((status, item_path, item_hex if item_hex else "-", item_val if item_val else "-"))
                     else:
-                        item_str = str(item)
-                        if field_bytes_limit > 0:
+                        item_str = str(item) if decode else "-"
+                        if decode and field_bytes_limit > 0:
                             item_str = truncate_field_value(item_str, field_bytes_limit)
-                        rows.append((status, item_path, "", item_str))
+                        rows.append((status, item_path, "-", item_str if item_str else "-"))
             else:
-                status = "OK" if parent_valid else "ERR"
-
                 # Apply display formatter if available
-                decoded_str = str(actual_val) if actual_val is not None else ""
+                decoded_str = str(actual_val) if (decode and actual_val is not None) else "-"
                 if decode and fields_metadata:
                     field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
                     metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
                     if metadata and metadata.attributes and metadata.attributes.display:
                         fmt_name = metadata.attributes.display.name
-                        # Use original hex for formatting (before truncation)
                         original_hex = v.hex if isinstance(v, FieldValue) else hex_val
                         formatted = formatters.format_value(fmt_name, original_hex, decoded_value=actual_val)
                         if formatted:
                             decoded_str = formatted
 
                 if field_bytes_limit > 0:
-                    hex_val = truncate_field_value(hex_val, field_bytes_limit)
-                    decoded_str = truncate_field_value(decoded_str, field_bytes_limit)
-                rows.append((status, field_path, hex_val, decoded_str))
+                    if hex_val: hex_val = truncate_field_value(hex_val, field_bytes_limit)
+                    if decoded_str != "-": decoded_str = truncate_field_value(decoded_str, field_bytes_limit)
+                
+                rows.append((status, field_path, hex_val if hex_val else "-", decoded_str if decoded_str else "-"))
 
     # Process all fields
     for field in validation_result.fields:
@@ -1140,9 +1213,9 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
         remaining = validation_result.remaining_bytes
         if field_bytes_limit > 0:
             remaining = truncate_field_value(remaining, field_bytes_limit)
-        rows.append(("ERR", "+remaining", remaining, ""))
+        rows.append(("ERR", "+remaining", remaining, "-"))
 
-    # Calculate column widths
+    # Calculate column widths for pretty alignment while keeping Tabs for parsing
     if not rows:
         return ""
 
@@ -1152,14 +1225,11 @@ def get_message_explanation_string_porcelain(validation_result: ValidationResult
         max(len(row[2]) for row in rows),  # hex
     ]
 
-    # Format rows with space padding
-    # Only include decoded column if decode=True
     lines = []
     for status, path, hex_val, decoded in rows:
-        if decode:
-            line = f"{status:<{col_widths[0]}}  {path:<{col_widths[1]}}  {hex_val:<{col_widths[2]}}  {decoded}"
-        else:
-            line = f"{status:<{col_widths[0]}}  {path:<{col_widths[1]}}  {hex_val}"
+        # Format: STATUS [pad] \t PATH [pad] \t HEX [pad] \t DECODED
+        # The Tab ensures unambiguous parsing even if decoded column has spaces
+        line = f"{status:<{col_widths[0]}}\t{path:<{col_widths[1]}}\t{hex_val:<{col_widths[2]}}\t{decoded}"
         lines.append(line.rstrip())
 
     return "\n".join(lines)
@@ -1692,6 +1762,11 @@ def cli_main():
                 msg = coco_file.get_message(args["<message_name>"])
                 fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
                 print(get_message_explanation_string_porcelain(result, fields_metadata, decode=args["--decode"], filter_fields=filter_fields, coco_file=coco_file, field_bytes_limit=field_bytes_limit, message_name=result.message_name))
+            elif args["--format"] == "json":
+                # JSON format: structured data
+                msg = coco_file.get_message(args["<message_name>"])
+                fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                print(get_message_explanation_string_json(result, fields_metadata, decode=args["--decode"], field_bytes_limit=field_bytes_limit))
             elif args["--tree"] or args["--format"] == "tree":
                 # Build field metadata for display formatters (including nested)
                 msg = coco_file.get_message(args["<message_name>"])
@@ -1752,6 +1827,17 @@ def cli_main():
                         status = "OK" if result.is_valid else "ERR"
                         chain_name = ":".join(result.protocol_chain) if result.protocol_chain else result.message_name
                         print(f"{status}  {chain_name}")
+                    if not result.is_valid:
+                        ret = 1
+                    if args["--list"] == False:
+                        break
+                    continue
+
+                # JSON format: structured data
+                if args["--format"] == "json":
+                    msg = coco_file.get_message(result.message_name)
+                    fields_metadata = collect_field_metadata(decoder, msg) if msg else {}
+                    print(get_message_explanation_string_json(result, fields_metadata, decode=args["--decode"], field_bytes_limit=field_bytes_limit))
                     if not result.is_valid:
                         ret = 1
                     if args["--list"] == False:

@@ -185,7 +185,7 @@ class UntilSize:
 
 @dataclass
 class BranchDeterminedSize:
-    """Size determined by matched branch: [*]
+    """Size determined by matched branch: []
 
     Used with match clauses where different branches have different sizes.
     The parser will decode the match branch and use consumed bytes as size.

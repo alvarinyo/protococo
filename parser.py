@@ -312,7 +312,7 @@ class CocoTransformer(Transformer):
         if len(items) == 0:
             return VariableSize()  # Bare [] explicitly means Variable/Greedy
         val = items[0]
-        # Handle branch-determined size: [*] (BRANCH_SIZE token)
+        # Handle branch-determined size: [] (BRANCH_SIZE token)
         if isinstance(val, Token) and (val.type == 'BRANCH_SIZE' or str(val) == "*"):
             return BranchDeterminedSize()
         # Handle greedy size: [...] (GREEDY_SIZE token)
