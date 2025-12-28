@@ -1,0 +1,53 @@
+[1m[92m[ip:udp:dns][0m
+
+├── [1mheader[0m:
+│   ├── dst_mac: [92mFF:FF:FF:FF:FF:FF[0m
+│   ├── src_mac: [92m00:11:22:33:44:55[0m
+│   └── ethertype: [92m2048 (EtherType.IPV4)[0m
+└── [1mip[0m:
+    ├── [1mheader[0m:
+    │   ├── [1mversion_ihl[0m:
+    │   │   ├── version: [92m4[0m
+    │   │   └── ihl: [92m5[0m
+    │   ├── dscp_ecn: [92m0[0m
+    │   ├── total_length: [92m72[0m
+    │   ├── identification: [92m4660[0m
+    │   ├── [1mflags_fragment[0m:
+    │   │   ├── reserved: [92m0[0m
+    │   │   ├── dont_fragment: [92m0[0m
+    │   │   ├── more_fragments: [92m0[0m
+    │   │   └── fragment_offset: [92m0[0m
+    │   ├── ttl: [92m64[0m
+    │   ├── protocol: [92m17 (Protocol.UDP)[0m
+    │   ├── header_checksum: [92m43981[0m
+    │   ├── src_ip: [92m192.168.0.1[0m
+    │   └── dst_ip: [92m8.8.8.8[0m
+    └── [1mudp[0m:
+        ├── src_port: [92m3794[0m
+        ├── dst_port: [92m53 (dns)[0m
+        ├── length: [92m52[0m
+        ├── checksum: [92m0[0m
+        └── [1mdns[0m:
+            ├── [1mheader[0m:
+            │   ├── transaction_id: [92m4660[0m
+            │   ├── [1mflags[0m:
+            │   │   ├── qr_response: [92m0[0m
+            │   │   ├── opcode: [92m0[0m
+            │   │   ├── authoritative: [92m0[0m
+            │   │   ├── truncated: [92m0[0m
+            │   │   ├── recursion_desired: [92m1[0m
+            │   │   ├── recursion_available: [92m0[0m
+            │   │   ├── z_reserved: [92m0[0m
+            │   │   └── rcode: [92m0[0m
+            │   ├── question_count: [92m1[0m
+            │   ├── answer_count: [92m0[0m
+            │   ├── authority_count: [92m0[0m
+            │   └── additional_count: [92m0[0m
+            ├── [1mquestions[0m: [1 items]
+            │   └── [0]:
+            │       ├── qname: [92mwww.example.com[0m
+            │       ├── qtype: [92m1 (DnsQType.A)[0m
+            │       └── qclass: [92m1 (DnsQClass.IN)[0m
+            ├── [1manswers[0m: [0 items]
+            ├── [1mauthority[0m: [0 items]
+            └── [1madditional[0m: [0 items]

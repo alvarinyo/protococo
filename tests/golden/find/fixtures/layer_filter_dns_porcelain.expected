@@ -1,0 +1,18 @@
+OK  dns
+OK  header.transaction_id             1234                                        4660
+OK  header.flags.qr_response          0                                           0
+OK  header.flags.opcode               0                                           0
+OK  header.flags.authoritative        0                                           0
+OK  header.flags.truncated            0                                           0
+OK  header.flags.recursion_desired    1                                           1
+OK  header.flags.recursion_available  0                                           0
+OK  header.flags.z_reserved           0                                           0
+OK  header.flags.rcode                0                                           0
+OK  header.question_count             0001                                        1
+OK  header.answer_count               0000                                        0
+OK  header.authority_count            0000                                        0
+OK  header.additional_count           0000                                        0
+OK  questions                         03777777076578616d706c6503636f6d0000010001  [1 items]
+OK  answers                                                                       [0 items]
+OK  authority                                                                     [0 items]
+OK  additional                                                                    [0 items]

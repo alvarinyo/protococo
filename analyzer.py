@@ -181,6 +181,71 @@ class ValidationResult:
         return check_fields(self.fields)
 
 
+def extract_layer_subtree(result: ValidationResult, layer_name: str, decoder: 'Decoder') -> ValidationResult | None:
+    """Extract subtree for a specific layer from a decoded result.
+
+    Args:
+        result: The full ValidationResult from decoding
+        layer_name: Field name of the target layer (e.g., "dns", "ip")
+        decoder: Decoder instance to re-decode the extracted layer
+
+    Returns:
+        New ValidationResult containing only the target layer's subtree,
+        or None if layer_name not found in protocol_chain.
+    """
+    if not result.protocol_chain or layer_name not in result.protocol_chain:
+        return None
+
+    # If target is the root layer (first in chain), return as-is
+    layer_idx = result.protocol_chain.index(layer_name)
+    if layer_idx == 0:
+        return result
+
+    # Navigate through the nested structure following the protocol chain
+    # Chain example: ["ethernet", "ip", "udp", "dns"] - to find "dns",
+    # we traverse: fields -> ip -> udp -> dns
+    path_to_target = result.protocol_chain[1:layer_idx + 1]  # Skip root, include target
+
+    current = None
+    # First, find the starting point in fields (the second layer in chain)
+    for field in result.fields:
+        if isinstance(field.decoded_value, dict):
+            if path_to_target[0] in field.decoded_value:
+                current = field.decoded_value[path_to_target[0]]
+                break
+            # Also check promoted_fields
+            if field.promoted_fields and path_to_target[0] in field.promoted_fields:
+                current = field.promoted_fields[path_to_target[0]]
+                break
+
+    if current is None:
+        return None
+
+    # Navigate remaining path
+    for field_name in path_to_target[1:]:
+        if isinstance(current, FieldValue):
+            current = current.val
+        if not isinstance(current, dict) or field_name not in current:
+            return None
+        current = current[field_name]
+
+    # Extract the FieldValue for the target layer
+    if isinstance(current, FieldValue):
+        layer_hex = current.hex
+    else:
+        return None
+
+    # Re-decode the extracted layer hex using the decoder to get proper message type and formatting
+    # Use identify_message to auto-detect the message type
+    candidates = decoder.identify_message(layer_hex)
+    if candidates:
+        # Return the best match (first candidate)
+        return candidates[0]
+
+    # Fallback: if identify_message fails, return None
+    return None
+
+
 class Decoder:
     """Decodes binary messages using protocol definitions."""
 

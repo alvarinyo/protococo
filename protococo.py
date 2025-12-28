@@ -6,11 +6,13 @@ Usage:
                       [--cocofile=<file> --format=<option>]
                       [--dissect-fields=<comma_separated_fields>]
                       [--verbose --decode --decode-no-newlines --tree --layer-colors --follow-pointers]
+                      [--layer=<name>]
                       [-L <n> | --field-bytes-limit=<n>]
   protococo find   [<message_hex_string> ...]
                       [--cocofile=<file> --format=<option>]
                       [--dissect | --dissect-fields=<comma_separated_fields>]
                       [--list --verbose --decode --decode-no-newlines --long-names --tree --layer-colors --follow-pointers]
+                      [--layer=<name>]
                       [-L <n> | --field-bytes-limit=<n>]
   protococo create (<message_name> | --from-json=<json_file>)
                       [--cocofile=<file>]
@@ -38,6 +40,7 @@ Options:
   --list                    Include a list of the most fitting messages in find results.
   --tree                    Display dissected fields as a tree structure.
   --layer-colors            Color tree background by protocol layer depth (requires --tree).
+  --layer=<name>            Filter output to show only the specified protocol layer subtree.
   -L <n>, --field-bytes-limit=<n>
                             Truncate long field values to N bytes in output [default: 32].
                                 Use 0 for unlimited.
@@ -56,7 +59,7 @@ import json
 import copy
 from docopt import docopt
 from parser import parse, ParseError
-from analyzer import Decoder, ValidationResult, DecodeResult, FieldValue
+from analyzer import Decoder, ValidationResult, DecodeResult, FieldValue, extract_layer_subtree
 from encoder import Encoder
 from coco_ast import EnumTypeRef, BranchDeterminedSize
 import formatters
@@ -1676,6 +1679,14 @@ def cli_main():
         for message_hex_string in messages_input:
             result = decoder.validate_by_name(args["<message_name>"], message_hex_string)
 
+            # Apply layer filtering if requested
+            if args["--layer"]:
+                filtered_result = extract_layer_subtree(result, args["--layer"], decoder)
+                if filtered_result is None:
+                    print(f"Error: layer '{args['--layer']}' not found in protocol chain", file=sys.stderr)
+                    continue
+                result = filtered_result
+
             if args["--format"] == "porcelain":
                 # Porcelain format: machine-readable, space-padded columns
                 msg = coco_file.get_message(args["<message_name>"])
@@ -1705,6 +1716,21 @@ def cli_main():
         messages_input = sys.stdin.read().split() if not args["<message_hex_string>"] else args["<message_hex_string>"]
         for message_hex_string in messages_input:
             results = decoder.identify_message(message_hex_string)
+
+            # Apply layer filtering if requested - filter candidates before processing
+            if args["--layer"]:
+                filtered_results = []
+                for result in results:
+                    filtered_result = extract_layer_subtree(result, args["--layer"], decoder)
+                    if filtered_result is not None:
+                        filtered_results.append(filtered_result)
+
+                # If no candidates have the layer, print error and skip
+                if not filtered_results:
+                    print(f"Error: layer '{args['--layer']}' not found in protocol chain", file=sys.stderr)
+                    continue
+
+                results = filtered_results
 
             for i, result in enumerate(results):
                 msg = coco_file.get_message(result.message_name)

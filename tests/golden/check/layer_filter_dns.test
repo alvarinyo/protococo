@@ -1,0 +1,6 @@
+#!/bin/bash
+# Test: layer_filter_dns
+
+COMMAND="bash -c './scripts/pcap2hex.sh tests/pcaps/dns.pcap 4 | python3 protococo.py check ethernet_no_fcs --cocofile=protocols/internet_stack.coco --tree --layer=dns --decode --follow-pointers -L 32'"
+EXPECTED_EXIT=0
+EXPECTED_OUTPUT="tests/golden/check/fixtures/layer_filter_dns.expected"
