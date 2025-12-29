@@ -1,26 +1,18 @@
-OK  dns_message
-OK  header.transaction_id             f76f                    63343
-OK  header.flags.rcode3               0                       0
-OK  header.flags.rcode2               0                       0
-OK  header.flags.rcode1               0                       0
-OK  header.flags.rcode0               0                       0
-OK  header.flags.checking_disabled    0                       0
-OK  header.flags.authenticated_data   0                       0
-OK  header.flags.z_reserved           0                       0
-OK  header.flags.recursion_available  0                       0
-OK  header.flags.recursion_desired    1                       1
-OK  header.flags.truncated            0                       0
-OK  header.flags.authoritative        0                       0
-OK  header.flags.opcode3              0                       0
-OK  header.flags.opcode2              0                       0
-OK  header.flags.opcode1              0                       0
-OK  header.flags.opcode0              0                       0
-OK  header.flags.qr_response          0                       0
-OK  header.question_count             0001                    1
-OK  header.answer_count               0000                    0
-OK  header.authority_count            0000                    0
-OK  header.additional_count           0000                    0
-OK  questions                         06676f6f676c6503...+8B  [1 items]
-OK  answers                                                   [0 items]
-OK  authority                                                 [0 items]
-OK  additional                                                [0 items]
+OK	dns_message                     	-                               	-
+OK	header.transaction_id           	f76f                            	63343
+OK	header.flags.qr_response        	0                               	0
+OK	header.flags.opcode             	0                               	0
+OK	header.flags.authoritative      	0                               	0
+OK	header.flags.truncated          	0                               	0
+OK	header.flags.recursion_desired  	1                               	1
+OK	header.flags.recursion_available	0                               	0
+OK	header.flags.z_reserved         	0                               	0
+OK	header.flags.rcode              	0                               	0
+OK	header.question_count           	0001                            	1
+OK	header.answer_count             	0000                            	0
+OK	header.authority_count          	0000                            	0
+OK	header.additional_count         	0000                            	0
+OK	questions                       	06676f6f676c6503636f6d00000f0001	[1 items]
+OK	answers                         	-                               	[0 items]
+OK	authority                       	-                               	[0 items]
+OK	additional                      	-                               	[0 items]

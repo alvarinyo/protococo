@@ -1,6 +1,5 @@
 OK  dns
-OK  dns_label
-OK  dns_header
 OK  dns_name
+OK  dns_header
 ERR  dns_rr
 ERR  dns_question

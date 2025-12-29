@@ -556,12 +556,12 @@ class Decoder:
         # Handle virtual fields (e.g. standalone matches)
         if field_type is None:
             if field.match_clause:
-                decoded_value = self._decode_match(field.match_clause, context)
+                decoded_value, match_valid = self._decode_match(field.match_clause, context)
                 return DecodeResult(
                     name=field.name,
                     hex_value="",
                     decoded_value=decoded_value,
-                    is_valid=True
+                    is_valid=match_valid
                 )
             return DecodeResult(name=field.name, hex_value="", decoded_value=None, is_valid=True)
 
@@ -587,19 +587,19 @@ class Decoder:
                 )
             
             # Decode match clause and let it determine how many bits to consume
-            decoded_value = self._decode_match(field.match_clause, context)
+            decoded_value, match_valid = self._decode_match(field.match_clause, context)
             promoted_fields = decoded_value if isinstance(decoded_value, dict) else {}
-            
+
             end_bit_offset = self.bit_offset
             byte_start = start_bit_offset // 8
             byte_end = (end_bit_offset + 7) // 8
             hex_value = self.data[byte_start:byte_end].hex()
-            
+
             return DecodeResult(
                 name=field.name,
                 hex_value=hex_value,
                 decoded_value=decoded_value,
-                is_valid=True,
+                is_valid=match_valid,
                 promoted_fields=promoted_fields
             )
 
@@ -731,19 +731,36 @@ class Decoder:
         # --- Sub-Structure Parsing (Match / Structure Body) ---
         if field.match_clause or field.structure_body:
             if isinstance(field_type, BytesType):
-                end_bits = self.bit_offset
-                self.bit_offset = start_bit_offset
-                
+                end_bits = self.bit_offset  # Position after consuming declared size
+                self.bit_offset = start_bit_offset  # Rewind to start
+
                 if field.match_clause:
-                    # Attached match on bytes field
-                    match_res = self._decode_match(field.match_clause, context)
+                    # Attached match on bytes field - enforce size boundary
+                    match_res, match_valid = self._decode_match(field.match_clause, context, max_bits=size_bits)
                     if isinstance(match_res, dict):
                         promoted_fields = match_res
+                    # Propagate validity from match
+                    if not match_valid:
+                        is_valid = False
+                        errors.append("Match clause validation failed due to boundary overflow")
                     # Base field (bytes) decoded_value remains as raw hex
                 else:
-                    decoded_value = self._decode_structure(field.structure_body, context)
-                
-                self.bit_offset = max(end_bits, self.bit_offset)
+                    # Structure body - also enforce size boundary for consistency
+                    decoded_value, struct_valid = self._decode_structure(field.structure_body, context, track_validity=True, max_bits=size_bits)
+                    if not struct_valid:
+                        is_valid = False
+                        errors.append("Structure validation failed due to boundary overflow")
+
+                # Ensure we advance to the end of the declared field size
+                # (match/structure may have consumed less due to padding or early termination)
+                consumed_bits = self.bit_offset - start_bit_offset
+                if consumed_bits < size_bits:
+                    # Consumed less than declared - advance to field boundary (skip padding)
+                    self.bit_offset = start_bit_offset + size_bits
+                elif consumed_bits > size_bits:
+                    # Should be clamped already by _decode_fields, but ensure it here too for safety
+                    self.bit_offset = start_bit_offset + size_bits
+                # else: consumed_bits == size_bits, already at correct position
             else:
                 if field.match_clause:
                     # Attached match on non-bytes field (e.g. u16 or bitfield)
@@ -751,10 +768,14 @@ class Decoder:
                     temp_context[field.name] = decoded_value
                     if isinstance(decoded_value, dict):
                         self._flatten_to_context(field.name, decoded_value, temp_context)
-                    
-                    match_res = self._decode_match(field.match_clause, temp_context)
+
+                    match_res, match_valid = self._decode_match(field.match_clause, temp_context)
                     if isinstance(match_res, dict):
                         promoted_fields = match_res
+                    # Propagate validity from match
+                    if not match_valid:
+                        is_valid = False
+                        errors.append("Match clause validation failed")
                     # Base field (int/bitfield) decoded_value remains as-is
                 else:
                     decoded_value = self._decode_structure(field.structure_body, context)
@@ -934,7 +955,17 @@ class Decoder:
         if isinstance(value, FieldValue): value = value.val
         return value
 
-    def _decode_match(self, match_clause: MatchClause, context: dict) -> dict:
+    def _decode_match(self, match_clause: MatchClause, context: dict, max_bits: int | None = None) -> tuple[dict, bool]:
+        """Decode a match clause.
+
+        Args:
+            match_clause: The match clause to decode
+            context: Current decoding context
+            max_bits: Maximum bits the match clause is allowed to consume (None = unlimited)
+
+        Returns:
+            Tuple of (dictionary of decoded fields from the matched branch, validity flag)
+        """
         discriminator_value = self._resolve_path(match_clause.discriminator, context)
         matching_branch, default_branch = None, None
         for branch in match_clause.branches:
@@ -948,11 +979,32 @@ class Decoder:
                     if member and discriminator_value == member.value: matching_branch = branch; break
             elif branch.pattern == discriminator_value: matching_branch = branch; break
         branch = matching_branch or default_branch
-        return self._decode_structure(branch.fields, context) if branch and branch.fields else {}
+        if branch and branch.fields:
+            result, valid = self._decode_structure(branch.fields, context, track_validity=True, max_bits=max_bits)
+            return result, valid
+        return {}, True
 
-    def _decode_fields(self, fields: list[Field], context: dict) -> tuple[dict, list[DecodeResult], bool]:
+    def _decode_fields(self, fields: list[Field], context: dict, max_bits: int | None = None) -> tuple[dict, list[DecodeResult], bool]:
+        """Decode a list of fields.
+
+        Args:
+            fields: List of fields to decode
+            context: Decoding context
+            max_bits: Maximum bits allowed to consume for all fields combined (None = unlimited)
+
+        Returns:
+            Tuple of (result_dict, results_list, all_valid)
+        """
         result_dict, results_list, all_valid = {}, [], True
+        start_bit_offset = self.bit_offset  # Track starting position for boundary checking
+
         for field in fields:
+            # Check boundary BEFORE decoding each field
+            if max_bits is not None:
+                consumed_bits = self.bit_offset - start_bit_offset
+                if consumed_bits >= max_bits:
+                    # Already at or past boundary - stop decoding remaining fields
+                    break
             if field.type is None and field.match_clause:
                 discriminator_value = self._resolve_path(field.match_clause.discriminator, context)
                 matching_branch, default_branch = None, None
@@ -979,6 +1031,23 @@ class Decoder:
 
             decode_result = self.decode_field(field, context)
 
+            # Check boundary AFTER decoding field
+            if max_bits is not None:
+                consumed_bits = self.bit_offset - start_bit_offset
+                if consumed_bits > max_bits:
+                    # Overflow detected!
+                    all_valid = False
+                    decode_result.is_valid = False
+                    overflow_amount = consumed_bits - max_bits
+                    if decode_result.errors is None:
+                        decode_result.errors = []
+                    decode_result.errors.append(
+                        f"Boundary overflow: field '{field.name}' exceeded size limit by {overflow_amount // 8} bytes "
+                        f"({overflow_amount} bits). Parser clamped to boundary."
+                    )
+                    # Clamp to boundary
+                    self.bit_offset = start_bit_offset + max_bits
+
             # --- SPLATTING & Transparency ---
             # If the field has an attached match clause, we promote its results
             # to be siblings AND skip adding the base field to result_dict.
@@ -991,7 +1060,8 @@ class Decoder:
                         actual_val = sub_val.val if isinstance(sub_val, FieldValue) else sub_val
                         context[sub_name] = actual_val
                         if isinstance(actual_val, dict): self._flatten_to_context(sub_name, actual_val, context)
-                        results_list.append(DecodeResult(name=sub_name, hex_value=sub_val.hex if isinstance(sub_val, FieldValue) else "", decoded_value=actual_val, is_valid=True))
+                        # Preserve validity and errors from the base decode_result
+                        results_list.append(DecodeResult(name=sub_name, hex_value=sub_val.hex if isinstance(sub_val, FieldValue) else "", decoded_value=actual_val, is_valid=decode_result.is_valid, errors=decode_result.errors))
                 else:
                     # Match clause exists but no promoted fields
                     # Skip adding base field for branch-determined size [] to remain transparent
@@ -1016,9 +1086,20 @@ class Decoder:
             if not decode_result.is_valid: all_valid = False
         return result_dict, results_list, all_valid
 
-    def _decode_structure(self, fields: list[Field], parent_context: dict, track_validity: bool = False) -> dict | tuple[dict, bool]:
+    def _decode_structure(self, fields: list[Field], parent_context: dict, track_validity: bool = False, max_bits: int | None = None) -> dict | tuple[dict, bool]:
+        """Decode a structure (list of fields).
+
+        Args:
+            fields: List of fields to decode
+            parent_context: Parent decoding context
+            track_validity: Whether to return validity flag
+            max_bits: Maximum bits allowed to consume (None = unlimited)
+
+        Returns:
+            Dictionary of decoded fields, optionally with validity flag
+        """
         context = dict(parent_context)
-        result_dict, _, all_valid = self._decode_fields(fields, context)
+        result_dict, _, all_valid = self._decode_fields(fields, context, max_bits=max_bits)
         return (result_dict, all_valid) if track_validity else result_dict
 
     def _decode_embedded_message(self, msg_def: Message, context: dict) -> tuple[dict, int]:

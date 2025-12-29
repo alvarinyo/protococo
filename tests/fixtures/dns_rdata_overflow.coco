@@ -1,0 +1,39 @@
+version 1.0
+endian be
+
+// Simplified DNS structures for testing rd_length overflow
+
+message dns_name {
+  bits[2] label_type
+  match label_type {
+    0b00 -> {
+      bits[6] label_length
+      match label_length {
+        0 -> {}
+        _ -> {
+          bytes label_data[label_length]
+          dns_name next
+        }
+      }
+    }
+  }
+}
+
+enum DnsQType : u16 {
+  A = 1,
+  CNAME = 5
+}
+
+message dns_rr_overflow_test {
+  DnsQType rr_type
+  u16 rd_length
+  bytes rdata[rd_length] match rr_type {
+    DnsQType.A -> {
+      u32 address4
+    }
+    DnsQType.CNAME -> {
+      dns_name cname
+    }
+  }
+  u16 next_field  // Should be at correct offset even if CNAME overflows
+}
