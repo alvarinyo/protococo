@@ -998,28 +998,68 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
 
 def get_message_explanation_string_json(validation_result: ValidationResult, fields_metadata: dict = None, decode=False, field_bytes_limit: int = 32):
-    """Format validation result as a JSON string."""
-    def serialize_val(val, hex_val=None, field_path=""):
+    """Format validation result as a structured JSON string with a parallel metadata manifest."""
+    dissection = {}
+    metadata_map = {}
+
+    def process_node(val, hex_val=None, is_valid=True, errors=None, field_path=""):
+        """Recursive worker to build the clean tree and populate metadata."""
         if isinstance(val, FieldValue):
-            return serialize_val(val.val, val.hex, field_path)
-        
-        # Apply display formatter if decode=True (check before recursing into dicts)
+            return process_node(val.val, val.hex, is_valid, errors, field_path)
+
+        # Record metadata for this path if it's not the root
+        if field_path:
+            meta = {"hex": hex_val if hex_val is not None else "", "is_valid": is_valid}
+            if errors:
+                meta["errors"] = errors
+            metadata_map[field_path] = meta
+
+        # Check for branch-determined size [] transparency
+        # If metadata shows this field is transparent, its children should be promoted
+        from coco_ast import BranchDeterminedSize
+        field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+        metadata_obj = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) if fields_metadata else None
+        is_transparent = isinstance(getattr(metadata_obj, 'size', None), BranchDeterminedSize)
+
+        # Apply display formatter if decode=True
         if decode and fields_metadata and hex_val:
-            field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
-            metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path)
-            if metadata and metadata.attributes and metadata.attributes.display:
-                fmt_name = metadata.attributes.display.name
+            if metadata_obj and metadata_obj.attributes and metadata_obj.attributes.display:
+                fmt_name = metadata_obj.attributes.display.name
                 formatted = formatters.format_value(fmt_name, hex_val, decoded_value=val)
                 if formatted:
                     return formatted
 
         if isinstance(val, dict):
-            return {k: serialize_val(v, field_path=f"{field_path}.{k}" if field_path else k) for k, v in val.items()}
+            res = {}
+            for k, v in val.items():
+                # Determine child path based on transparency
+                child_path = field_path if is_transparent else (f"{field_path}.{k}" if field_path else k)
+                
+                # Check for child metadata if v is FieldValue
+                child_is_valid = True
+                child_errors = None
+                child_hex = None
+                if isinstance(v, FieldValue):
+                    child_hex = v.hex
+                    # We don't easily have is_valid/errors for nested dict items unless we look them up
+                    # but typically if they are in a dict they are part of a valid parent.
+                
+                processed_val = process_node(v, child_hex, child_is_valid, child_errors, child_path)
+                
+                if is_transparent and isinstance(processed_val, dict):
+                    res.update(processed_val)
+                else:
+                    res[k] = processed_val
+            return res
         
         if isinstance(val, list):
-            return [serialize_val(v, field_path=f"{field_path}[{i}]") for i, v in enumerate(val)]
+            res = []
+            for i, item in enumerate(val):
+                child_path = f"{field_path}[{i}]"
+                res.append(process_node(item, field_path=child_path))
+            return res
 
-        # Apply truncation if field_bytes_limit > 0
+        # Scalar value: Apply truncation if field_bytes_limit > 0
         if field_bytes_limit > 0 and isinstance(val, str) and not (decode and val.startswith("0x")):
             # Don't truncate if it looks like an enum already formatted
             if not ("." in val and not val.startswith("0x")):
@@ -1027,26 +1067,41 @@ def get_message_explanation_string_json(validation_result: ValidationResult, fie
 
         return val
 
+    # Build the dissection tree from top-level fields
+    for field in validation_result.fields:
+        # Determine if this top-level field is transparent
+        from coco_ast import BranchDeterminedSize
+        metadata_obj = fields_metadata.get(field.name) if fields_metadata else None
+        is_transparent = isinstance(getattr(metadata_obj, 'size', None), BranchDeterminedSize)
+
+        processed = process_node(
+            field.decoded_value, 
+            field.hex_value, 
+            field.is_valid, 
+            field.errors, 
+            field.name
+        )
+
+        if is_transparent and isinstance(processed, dict):
+            dissection.update(processed)
+        else:
+            dissection[field.name] = processed
+
     data = {
         "message_name": validation_result.message_name,
         "is_valid": validation_result.is_valid,
         "protocol_chain": validation_result.protocol_chain,
-        "fields": []
+        "dissection": dissection,
+        "metadata": metadata_map
     }
-
-    for field in validation_result.fields:
-        field_data = {
-            "name": field.name,
-            "hex": truncate_field_value(field.hex_value, field_bytes_limit) if field_bytes_limit > 0 else field.hex_value,
-            "is_valid": field.is_valid,
-            "decoded": serialize_val(field.decoded_value, field.hex_value, field.name)
-        }
-        if field.errors:
-            field_data["errors"] = field.errors
-        data["fields"].append(field_data)
 
     if validation_result.remaining_bytes:
         data["remaining_bytes"] = truncate_field_value(validation_result.remaining_bytes, field_bytes_limit) if field_bytes_limit > 0 else validation_result.remaining_bytes
+        metadata_map["+remaining"] = {
+            "hex": validation_result.remaining_bytes,
+            "is_valid": False,
+            "errors": ["Unconsumed bytes remaining"]
+        }
 
     return json.dumps(data, indent=2)
 

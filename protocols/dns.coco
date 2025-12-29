@@ -66,7 +66,7 @@ message dns_header {
   u16 additional_count
 }
 
-// DNS name - handles both normal label sequences and compression pointers
+// DNS name
 // A DNS name can be:
 // 1. A compression pointer (c0 xx) - 2 bytes total, jumps to another location
 // 2. A label sequence ending with 0x00 terminator
