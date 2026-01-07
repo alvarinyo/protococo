@@ -78,6 +78,10 @@ u64, u64:le, u64:be
 i8, i16, i32, i64  // signed (same endianness rules)
 ```
 
+**Integer rules:**
+- Standard integer types (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`) **must be byte-aligned**.
+- If a bit-level field leaves the parser at a non-byte boundary, any following standard integer type will cause a parse error.
+
 ### Variable-Length Types
 
 ```
@@ -94,22 +98,26 @@ string[]        // ASCII to end of message/field
 - `string:cstr[]` reads until first 0x00 byte (null terminator consumed but not included in value)
 - `string[]` reads all remaining bytes (no null terminator expected)
 
-### Bit Fields (Single Byte Only)
+### Bit Fields
+
+Bit fields allow reading arbitrary numbers of bits.
 
 ```
-bits[8] field_name {
-  bit     flag1        // bit 0 (LSB)
+bits[8] flags {
+  bit     flag1        // bit 0 (LSB if reading as integer)
   bits[3] mode         // bits 1-3
-  bits[4] reserved     // bits 4-7 (MSB)
+  bits[4] reserved     // bits 4-7
 }
+
+bits[3] priority       // Standalone bit field
 ```
 
 **Bit field rules:**
-- **Only 8-bit bit fields allowed** (single byte)
-- Bits numbered from LSB (bit 0) to MSB (bit 7)
-- Sum of all bits must equal 8
-- For multi-byte bit operations, use multiple `bits[8]` fields
-- Individual bit field values are treated as unsigned integers
+- `bits[N]` can read any number of bits.
+- If a `bitfield_body` `{ ... }` is provided, the sum of its members must exactly equal `N`.
+- Bits are numbered/filled according to the current bit offset.
+- For `bits[N]` where `N > 8`, the default endianness applies to how the bits are interpreted as an integer.
+- Individual bit field values are treated as unsigned integers.
 
 ---
 
@@ -514,13 +522,14 @@ message example {
 1. **Length mismatch:** Not enough bytes for field
 2. **Enum out of range:** Enum value not defined in enum members
 3. **Match no match:** No matching branch (and no default `_`)
-4. **Bit field sum:** Bit fields don't sum to 8 bits
-5. **Padding validation:** `pad[N] = 0xFF` finds non-0xFF bytes
-6. **Inheritance violation:** Override non-existent field, add new fields, etc.
-7. **Invalid nested path:** Reference to non-existent nested field
-8. **Non-self-delimiting array element:** Array element type has unbounded fields
-9. **Multiple unbounded fields:** More than one `[]` field without size
-10. **Unbounded field not at end:** `[]` field followed by other fields
+4. **Bit field sum:** Bit fields inside a body don't sum to the parent's `bits[N]` size
+5. **Alignment error:** Standard integer type (u8, u16, etc.) referenced at a non-byte boundary
+6. **Padding validation:** `pad[N] = 0xFF` finds non-0xFF bytes
+7. **Inheritance violation:** Override non-existent field, add new fields, etc.
+8. **Invalid nested path:** Reference to non-existent nested field
+9. **Non-self-delimiting array element:** Array element type has unbounded fields
+10. **Multiple unbounded fields:** More than one `[]` field without size
+11. **Unbounded field not at end:** `[]` field followed by other fields
 
 ---
 
@@ -687,7 +696,6 @@ message extensible_message {
 **Previous decisions maintained:**
 - Inheritance: override only, no field addition
 - Match: must be exhaustive
-- Bit fields: 8-bit only
 - Strings: default to ASCII
 - Error handling: strict validation
 
