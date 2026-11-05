@@ -1,0 +1,15 @@
+// BICP BICEPS Protocol Stack (MDLL2)
+// Stack: MDLL2 -> NL -> AL (no Transport Layer)
+//
+// Use this for the newer BICEPS/MDLL2 implementation.
+// Entry point: mdll2_frame
+//
+// Layer structure:
+//   MDLL2: Framing + CRC + reliable delivery (replaces DL+TL)
+//   NL: Fragmentation/reassembly
+//   AL: Device multiplexing
+
+version 1.0
+endian le
+
+include "mdll2.coco"

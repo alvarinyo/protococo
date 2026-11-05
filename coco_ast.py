@@ -248,6 +248,8 @@ class BitField:
     """A single bit field within bits[8]: bit flag or bits[3] mode"""
     name: str
     bit_count: int  # 1 for 'bit', N for 'bits[N]'
+    default_value: int | None = None  # Fixed value constraint (e.g., = 0xD)
+    attributes: 'FieldAttributes | None' = None  # Display formatters, etc.
 
 
 @dataclass

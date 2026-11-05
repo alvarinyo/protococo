@@ -1,0 +1,523 @@
+#protococo_version=0.2.0
+
+[1byte]
+02      $STX
+XX      $MESSAGE TYPE
+XX      $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+03      $ETX
+
+[2byte]
+02      $STX
+XX      $MESSAGE TYPE
+XXXX    $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+03      $ETX
+
+[general_message_format]
+$subtypeof 1byte 2byte
+$override MESSAGE TYPE
+XX      $MESSAGE TYPE
+$override MESSAGE BODY
+N       $MESSAGE BODY
+
+[binary_data_packet_1byte]
+02      $STX
+23      $BINARY DATA PACKET
+XX      $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+XXXX    $CHECKSUM
+03      $ETX
+
+[binary_data_packet_2byte]
+02      $STX
+25      $BINARY DATA PACKET
+XXXX    $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+XXXX    $CHECKSUM
+03      $ETX
+
+[mime_binary_data_packet]
+$subtypeof binary_data_packet_1byte
+$override MESSAGE BODY
+XX          $MIME TYPE LENGTH, lengthof MIME TYPE, encodedas littleendian
+N           $MIME TYPE, encodedas ascii
+XXXXXXXX    $MIME CONTENT LENGTH, lengthof MIME CONTENT, encodedas littleendian
+N           $MIME CONTENT
+
+[mime_binary_data_packet_2byte]
+$subtypeof binary_data_packet_2byte
+$override MESSAGE BODY
+XX          $MIME SEQUENCE NUMBER
+XX          $MIME TYPE LENGTH, lengthof MIME TYPE, encodedas littleendian
+N           $MIME TYPE, encodedas ascii
+XXXXXXXX    $MIME CONTENT LENGTH, lengthof MIME CONTENT, encodedas littleendian
+N           $MIME CONTENT
+
+[data_to_component]
+$subtypeof general_message_format
+$override MESSAGE TYPE
+82      $DATA TO COMPONENT
+$override MESSAGE BODY
+XXXX    $DEVICE INDEX
+XXXX    $COMPONENT TYPE ID
+XX      $COMPONENT INDEX
+XX      $MESSAGE OPTIONS
+N       $DATA
+
+[mime_downlink]
+$subtypeof data_to_component
+$override COMPONENT TYPE ID
+0000        $UART PASSTHROUGH
+$override DATA
+XX          $SEQUENCE NUMBER
+N           $BODY
+
+[mime_head_downlink]
+$subtypeof data_to_component
+$override COMPONENT TYPE ID
+0000        $UART PASSTHROUGH
+$override DATA
+00          $SEQUENCE NUMBER
+XX          $LENGTH OF MIME TYPE, lengthof MIME TYPE
+N           $MIME TYPE, encodedas ascii
+XXXXXXXX    $LENGTH OF FULL BODY, encodedas littleendian
+N           $BODY
+
+[1byte.data_from_uart]
+$subtypeof 1byte.general_message_format
+$override MESSAGE TYPE
+0E      $DATA FROM UART
+$override MESSAGE BODY
+XX      $IOX CHANNEL
+N       $DATA
+XXXX    $CRC CHECKSUM
+
+[2byte.data_from_uart]
+$subtypeof 2byte.general_message_format
+$override MESSAGE TYPE
+0E      $DATA FROM UART
+$override MESSAGE BODY
+XX      $IOX CHANNEL
+N       $DATA
+
+[mime_uplink]
+$subtypeof 1byte.data_from_uart 2byte.data_from_uart
+$override DATA
+XX          $SEQUENCE NUMBER
+N           $BODY
+
+[mime_head_uplink]
+$subtypeof 1byte.data_from_uart 2byte.data_from_uart
+$override DATA
+00          $SEQUENCE NUMBER
+XX          $LENGTH OF MIME TYPE, lengthof MIME TYPE
+N           $MIME TYPE, encodedas ascii
+XXXXXXXX    $LENGTH OF FULL BODY, encodedas littleendian
+N           $BODY
+
+[asos_over_mime]
+$subtypeof mime_head_uplink mime_head_downlink
+$override MIME TYPE
+(asos)    $ASOS MIME TYPE, encodedas ascii
+$override BODY
+XX        $ASOS CMD
+XX        $SEQUENCE
+N         $BODY
+
+[mime_asos_close]
+$subtypeof asos_over_mime
+$override ASOS CMD
+00      $ASOS CLOSE
+
+[mime_asos_open]
+$subtypeof asos_over_mime
+$override ASOS CMD
+01      $ASOS OPEN
+$override BODY
+N       $DATA, encodedas ascii
+
+[mime_asos_txdata]
+$subtypeof asos_over_mime
+$override ASOS CMD
+02      $ASOS TXDATA
+$override BODY
+N       $DATA
+
+[mime_asos_announce]
+$subtypeof asos_over_mime
+$override ASOS CMD
+03      $ASOS ANNOUNCE
+
+[mime_company_card_uplink]
+$subtypeof mime_head_uplink
+$override MIME TYPE
+(card)    $CARD MIME TYPE, encodedas ascii
+$override BODY
+XX        $SEQUENCE
+XX        $CARD CMD
+N         $DATA
+
+[mime_company_card_downlink]
+$subtypeof mime_head_downlink
+$override MIME TYPE
+(card)    $CARD MIME TYPE, encodedas ascii
+$override BODY
+XX        $SEQUENCE
+XX        $CARD CMD
+N         $DATA
+
+[mime_cc_get]
+$subtypeof mime_company_card_uplink
+$override CARD CMD
+10      $CARD CMD
+$override DATA
+XX      $DATA
+
+[mime_cc_get_any]
+$subtypeof mime_cc_get
+$override DATA
+00      $DATA
+
+[mime_cc_get_specific]
+$subtypeof mime_cc_get
+$override DATA
+01      $DATA
+
+
+[mime_cc_get_resp_ok]
+$subtypeof mime_company_card_downlink
+$override CARD CMD
+90      $CARD CMD
+$override DATA
+N       $CARD ATTRIBUTES
+
+[mime_cc_get_resp_error]
+$subtypeof mime_company_card_downlink
+$override CARD CMD
+7F      $CARD CMD
+$override DATA
+N       $ERROR DETAILS
+
+[mime_cc_release]
+$subtypeof mime_company_card_uplink
+$override CARD CMD
+11      $CARD CMD
+
+[mime_cc_release_resp_ok]
+$subtypeof mime_company_card_downlink
+$override CARD CMD
+91      $CARD CMD
+
+[mime_cc_command]
+$subtypeof mime_company_card_uplink
+$override CARD CMD
+12      $CARD CMD
+$override DATA
+N       $COMMAND DATA
+
+[mime_cc_command_resp]
+$subtypeof mime_company_card_downlink
+$override CARD CMD
+92      $CARD CMD
+$override DATA
+N       $RESPONSE DATA
+
+[mime_ureaderFile]
+$subtypeof mime_head_uplink
+$override MIME TYPE
+(ureaderFile)   $MIME TYPE, encodedas ascii
+$override BODY
+XXXXXXXX        $FILE TYPE, encodedas littleendian
+XXXXXXXX        $PARAM1, encodedas littleendian
+XXXXXXXX        $PARAM2, encodedas littleendian
+XXXXXXXX        $PARAM3, encodedas littleendian
+XXXXXXXX        $FILE NAME LENGTH, lengthof FILE NAME, encodedas littleendian
+N               $FILE NAME, encodedas ascii
+N               $FILE CONTENT
+
+[mime_ureaderFile_normal]
+$subtypeof mime_ureaderFile
+$override FILE TYPE
+00000000        $FILE TYPE, encodedas littleendian
+
+[mime_ureaderFile_tco]
+$subtypeof mime_ureaderFile
+$override FILE TYPE
+00000001        $FILE TYPE, encodedas littleendian
+
+[mime_ureaderFile_driver]
+$subtypeof mime_ureaderFile
+$override FILE TYPE
+00000002        $FILE TYPE, encodedas littleendian
+
+[mime_ureaderFile_tcodemand]
+$subtypeof mime_ureaderFile
+$override FILE TYPE
+00000003        $FILE TYPE, encodedas littleendian
+
+[mime_cmd]
+$subtypeof mime_head_downlink
+$override MIME TYPE
+(cmd)   $MIME TYPE, encodedas ascii
+$override BODY
+N       $BODY, encodedas ascii
+
+[mime_response]
+$subtypeof mime_head_uplink
+$override MIME TYPE
+(response)  $MIME TYPE, encodedas ascii
+$override BODY
+N           $BODY, encodedas ascii
+
+[mime_v2cmd]
+$subtypeof mime_head_downlink
+$override MIME TYPE
+(v2/cmd)    $MIME TYPE, encodedas ascii
+$override BODY
+XXXXXXXX    $COMMAND ID, encodedas bigendian
+N           $BODY, encodedas ascii
+
+[mime_v2response]
+$subtypeof mime_head_uplink
+$override MIME TYPE
+(v2/response)   $MIME TYPE, encodedas ascii
+$override BODY
+XXXXXXXX    $COMMAND ID, encodedas bigendian
+N       $BODY, encodedas ascii
+
+[mime_ack]
+$subtypeof mime_head_downlink
+$override MIME TYPE
+(ACK)       $ACK MIME TYPE, encodedas ascii
+$override BODY
+XXXXXXXX    $LENGTH OF ACKED MIME BODY, encodedas littleendian
+
+[mdm_uplink]
+$subtypeof mime_head_uplink
+$override MIME TYPE
+(zeus)      $ACK MIME TYPE, encodedas ascii
+$override BODY
+XX          $MESSAGE TYPE
+XX          $MESSAGE VERSION
+N           $DATA
+
+[mdm_downlink]
+$subtypeof mime_head_downlink
+$override MIME TYPE
+(zeus)      $ACK MIME TYPE, encodedas ascii
+$override BODY
+XX          $MESSAGE TYPE
+XX          $MESSAGE VERSION
+N           $DATA
+
+[mdm_start_ota]
+$subtypeof mdm_downlink
+$override MESSAGE TYPE
+01          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $PACKAGE ID, encodedas littleendian
+XXXXXXXX    $PACKAGE SIZE, encodedas littleendian
+XXXXXXXX    $BLOCK SIZE, encodedas littleendian
+XXXXXXXX    $BLOCK COUNT, encodedas littleendian
+XX          $BLOCK RETRIES, encodedas littleendian
+XXXXXXXX    $PACKAGE CRC32, encodedas littleendian
+XXXX        $PACKAGE CRC16, encodedas littleendian
+XX          $FORCE OVERWRITE
+
+
+[mdm_request_block]
+$subtypeof mdm_uplink
+$override MESSAGE TYPE
+02          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $PACKAGE ID, encodedas littleendian
+XXXXXXXX    $BLOCK NUMBER, encodedas littleendian
+
+[mdm_send_block]
+$subtypeof mdm_downlink
+$override MESSAGE TYPE
+03          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $PACKAGE ID, encodedas littleendian
+XXXXXXXX    $BLOCK NUMBER, encodedas littleendian
+XXXXXXXX    $BLOCK CRC32, encodedas littleendian
+XXXX        $BLOCK CRC16, encodedas littleendian
+N           $PAYLOAD
+
+[mdm_cancel_ota]
+$subtypeof mdm_downlink
+$override MESSAGE TYPE
+07          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $PACKAGE ID, encodedas littleendian
+
+[mdm_status]
+$subtypeof mdm_uplink
+$override MESSAGE TYPE
+04          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XX          $STATUS TYPE
+XX          $PAYLOAD TYPE
+N           $PAYLOAD
+
+[mdm_status_str]
+$subtypeof mdm_status
+$override STATUS TYPE
+00          $STATUS TYPE STR
+$override PAYLOAD
+N           $PAYLOAD, encodedas ascii
+
+[mdm_status_bin]
+$subtypeof mdm_status
+$override STATUS TYPE
+01          $STATUS TYPE BIN
+$override PAYLOAD
+N           $PAYLOAD
+
+[mdm_status_json]
+$subtypeof mdm_status
+$override STATUS TYPE
+02          $STATUS TYPE JSON
+$override PAYLOAD
+N           $PAYLOAD, encodedas ascii
+
+[mdm_command_request]
+$subtypeof mdm_downlink
+$override MESSAGE TYPE
+05          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $COMMAND ID, encodedas littleendian
+XX          $COMMAND TYPE
+N           $COMMAND
+
+[mdm_cmd_request_str]
+$subtypeof mdm_command_request
+$override COMMAND TYPE
+00          $COMMAND TYPE STR
+$override COMMAND
+N           $COMMAND, encodedas ascii
+
+[mdm_cmd_request_bin]
+$subtypeof mdm_command_request
+$override COMMAND TYPE
+01          $COMMAND TYPE BIN
+$override COMMAND
+N           $COMMAND
+
+[mdm_cmd_request_json]
+$subtypeof mdm_command_request
+$override COMMAND TYPE
+02          $COMMAND TYPE JSON
+$override COMMAND
+N           $COMMAND, encodedas ascii
+
+[mdm_cmd_response]
+$subtypeof mdm_uplink
+$override MESSAGE TYPE
+06          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $JOB ID, encodedas littleendian
+XXXXXXXX    $COMMAND ID, encodedas littleendian
+XX          $RESPONSE CODE
+XX          $RESPONSE TYPE
+N           $RESPONSE
+
+[mdm_cmd_response_str]
+$subtypeof mdm_cmd_response
+$override RESPONSE TYPE
+00          $RESPONSE TYPE
+$override RESPONSE
+N           $RESPONSE
+
+[mdm_cmd_response_bin]
+$subtypeof mdm_cmd_response
+$override RESPONSE TYPE
+01          $RESPONSE TYPE
+$override RESPONSE
+N           $RESPONSE
+
+[mdm_cmd_response_json]
+$subtypeof mdm_cmd_response
+$override RESPONSE TYPE
+02          $RESPONSE TYPE
+$override RESPONSE
+N           $RESPONSE
+
+[mdm_request_package]
+$subtypeof mdm_uplink
+$override MESSAGE TYPE
+08          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $IOX DEVICE ID, encodedas littleendian
+XX          $FILE REQUEST TYPE
+XX          $FILE REFERENCE LENGTH, encodedas littleendian
+N           $FILE REFERENCE
+
+[mdm_req_package_by_id]
+$subtypeof mdm_request_package
+$override FILE REQUEST TYPE
+01          $FILE REQUEST TYPE
+$override FILE REFERENCE
+XXXXXXXX    $FILE ID, encodedas littleendian
+
+[mdm_req_package_by_name]
+$subtypeof mdm_request_package
+$override FILE REQUEST TYPE
+02          $FILE REQUEST TYPE
+$override FILE REFERENCE
+N           $FILE NAME, encodedas ascii
+
+[mdm_file_ota_start]
+$subtypeof mdm_downlink
+$override MESSAGE TYPE
+09          $MESSAGE TYPE
+$override MESSAGE VERSION
+01          $MESSAGE VERSION
+$override DATA
+XXXXXXXX    $PACKAGE ID, encodedas littleendian
+XXXXXXXX    $PACKAGE SIZE, encodedas littleendian
+XXXXXXXX    $BLOCK SIZE, encodedas littleendian
+XXXXXXXX    $BLOCK COUNT, encodedas littleendian
+XX          $BLOCK RETRIES, encodedas littleendian
+XXXXXXXX    $PACKAGE CRC32, encodedas littleendian
+XXXX        $PACKAGE CRC16, encodedas littleendian
+XX          $FORCE OVERWRITE
+XX          $FILE REQUEST TYPE
+XX          $FILE REFERENCE LENGTH, encodedas littleendian
+N           $FILE REFERENCE
+
+[mdm_file_ota_by_id]
+$subtypeof mdm_file_ota_start
+$override FILE REQUEST TYPE
+01          $FILE REQUEST TYPE
+$override FILE REFERENCE
+XXXXXXXX    $FILE ID, encodedas littleendian
+
+[mdm_file_ota_by_name]
+$subtypeof mdm_file_ota_start
+$override FILE REQUEST TYPE
+02          $FILE REQUEST TYPE
+$override FILE REFERENCE
+N           $FILE NAME, encodedas ascii

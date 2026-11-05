@@ -1,0 +1,59 @@
+// BICP AUXCTL (Auxiliary Controller) Application Layer Messages
+//
+// AUXCTL uses regmap interface with register addresses:
+// - 0x00: SLEEP - Sleep/power mode register (2-bit field)
+// - 0x01: CRS - Control/status register
+// - 0x02: AUXMCUVER - MCU version register (128-bit!)
+// - 0x03: WUPSTS - Wakeup status register
+// - 0x04: WUPEN - Wakeup enable register
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Note: AUXMCUVER is a 128-bit (16 bytes) register!
+//
+// Reference: /home/alvaroluis/s/blue-icp/kernel_modules/bicp-auxctl.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// AUXCTL register addresses
+enum AuxctlRegister : bits[15] {
+  SLEEP = 0x00,       // Sleep/power mode
+  CRS = 0x01,         // Control/status
+  AUXMCUVER = 0x02,   // MCU version (128-bit)
+  WUPSTS = 0x03,      // Wakeup status
+  WUPEN = 0x04        // Wakeup enable
+}
+
+// AUXCTL regmap message (wire format sent over AL)
+message auxctl_regmap {
+  RWFlag rw_flag
+  AuxctlRegister reg_addr
+
+  bytes data[] match reg_addr {
+    AuxctlRegister.SLEEP -> {
+      u32 sleep_mode [display: hex]  // Power mode (2-bit field): normal/light/deep/off
+    }
+    AuxctlRegister.CRS -> {
+      u32 control_status [display: hex]  // Control/status register
+    }
+    AuxctlRegister.AUXMCUVER -> {
+      // Version register is 128-bit (16 bytes)
+      // Low 64: git SHA (big-endian)
+      // High 64: version fields (count, hotfix, minor, major) + flags
+      u64 version_sha [display: hex]      // Git SHA (BE)
+      u64 version_fields [display: hex]   // Version info + flags
+    }
+    AuxctlRegister.WUPSTS -> {
+      u32 wakeup_status [display: hex]  // Wakeup source status bits
+    }
+    AuxctlRegister.WUPEN -> {
+      u32 wakeup_enable [display: hex]  // Wakeup source enable bits
+    }
+  }
+}

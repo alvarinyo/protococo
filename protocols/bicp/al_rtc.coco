@@ -1,0 +1,84 @@
+// BICP RTC (Real-Time Clock) Application Layer Messages
+//
+// RTC uses regmap interface with register addresses:
+// - 0x00: Time register (8 bytes, BCD encoded)
+// - 0x01: Alarm register (4 bytes, BCD encoded + precision bits)
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Reference: /home/alvaroluis/s/aux-controller/external/blue-icp/kernel_modules/bicp-rtc.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// RTC register addresses
+enum RtcRegister : bits[15] {
+  TIME = 0x00,
+  ALARM = 0x01
+}
+
+// RTC time structure (64-bit BCD-encoded)
+// Year is offset from 2000 (tm_year - 100 in Linux)
+message rtc_time {
+  bits[64] time_bcd {
+    bits[4] sec_units        // Seconds units (0-9)
+    bits[3] sec_tens         // Seconds tens (0-5)
+    bit reserved0
+    bits[4] min_units        // Minutes units (0-9)
+    bits[3] min_tens         // Minutes tens (0-5)
+    bit reserved1
+    bits[4] hour_units       // Hours units (0-9)
+    bits[2] hour_tens        // Hours tens (0-2)
+    bits[2] reserved2
+    bits[4] day_units        // Day units (0-9)
+    bits[2] day_tens         // Day tens (0-3)
+    bits[2] reserved3
+    bits[4] mon_units        // Month units (0-9)
+    bit mon_tens             // Month tens (0-1)
+    bits[3] reserved4
+    bits[4] year_units       // Year units (0-9)
+    bits[4] year_tens        // Year tens (0-9)
+    bits[16] reserved5
+  }
+}
+
+// RTC alarm structure (32-bit BCD-encoded + precision masks)
+// Precision bits: 0 = enabled (field is used for matching), 1 = disabled (field ignored)
+message rtc_alarm {
+  bits[32] alarm_bcd {
+    bits[4] sec_units        // Seconds units (0-9)
+    bits[3] sec_tens         // Seconds tens (0-5)
+    bit sec_prec             // Seconds precision mask (0=enabled)
+    bits[4] min_units        // Minutes units (0-9)
+    bits[3] min_tens         // Minutes tens (0-5)
+    bit min_prec             // Minutes precision mask (0=enabled)
+    bits[4] hour_units       // Hours units (0-9)
+    bits[2] hour_tens        // Hours tens (0-2)
+    bit reserved0
+    bit hour_prec            // Hours precision mask (0=enabled)
+    bits[4] day_units        // Day units (0-9)
+    bits[2] day_tens         // Day tens (0-3)
+    bit reserved1
+    bit day_prec             // Day precision mask (0=enabled)
+  }
+}
+
+// RTC regmap message (wire format sent over AL)
+message rtc_regmap {
+  RWFlag rw_flag
+  RtcRegister reg_addr      // Register address (2 bytes LE)
+
+  bytes data[] match reg_addr {
+    RtcRegister.TIME -> {
+      u64 time [display: hex]         // 8-byte time structure
+    }
+    RtcRegister.ALARM -> {
+      u32 alarm [display: hex]      // 4-byte alarm structure
+    }
+  }
+}

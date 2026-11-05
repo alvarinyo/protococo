@@ -1,0 +1,22 @@
+// BICP Device IDs
+// Maps AL dev_id field to specific application drivers
+//
+// Reference: /home/alvaroluis/s/meta-trinity/meta-rz-platform/recipes-kernel/linux/linux-renesas/dtb/trinity.dtsi
+
+version 1.0
+endian le
+
+// Device ID enumeration based on Trinity production device tree
+enum BicpDeviceId : u8 {
+  PINCTRL = 0,      // GPIO pin control
+  IRQ = 1,          // Interrupt controller
+  RTC = 2,          // Real-time clock
+  AUXCTL = 3,       // Auxiliary controller
+  ADC = 4,          // Analog-to-digital converter
+  IMU = 5,          // Inertial measurement unit
+  CAN = 6,          // CAN bus (bicp-can-iox)
+  MAIN_IRQ = 7,     // Main interrupt controller
+  BMS = 8,          // Battery management system
+  USER = 0x20,      // User-defined application (32)
+  PADDING = 0xFF    // Padding byte (reserved)
+}

@@ -1,0 +1,60 @@
+// BICP BMS (Battery Management System) Application Layer Messages
+//
+// BMS uses regmap interface with register addresses:
+// - 0x00: BMSIMID - BMS/charger IC ID register
+// - 0x01: BMSST - Status register (battery health, charging status, presence)
+// - 0x02: BMSCHRGCTL - Charge control register (64-bit! voltage/current limits)
+// - 0x03: BMSPROT - Protection register
+// - 0x04: BMSMODE - Mode register (shipping mode)
+// - 0x05: BMSCMD - Command register (reset commands)
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Note: BMSCHRGCTL is a 64-bit register, others are 32-bit
+//
+// Reference: /home/alvaroluis/s/blue-icp/kernel_modules/bicp-bms.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// BMS register addresses
+enum BmsRegister : bits[15] {
+  BMSIMID = 0x00,      // BMS/charger IC ID
+  BMSST = 0x01,        // Status register
+  BMSCHRGCTL = 0x02,   // Charge control (64-bit)
+  BMSPROT = 0x03,      // Protection register
+  BMSMODE = 0x04,      // Mode register (ship mode)
+  BMSCMD = 0x05        // Command register (reset)
+}
+
+// BMS regmap message (wire format sent over AL)
+message bms_regmap {
+  RWFlag rw_flag
+  BmsRegister reg_addr
+
+  bytes data[] match reg_addr {
+    BmsRegister.BMSIMID -> {
+      u32 bms_id [display: hex]  // BMS/charger IC ID (0x00 = BQ21080)
+    }
+    BmsRegister.BMSST -> {
+      u32 status [display: hex]  // Health, status, presence bits
+    }
+    BmsRegister.BMSCHRGCTL -> {
+      u64 charge_control [display: hex]  // Voltage/current limits, thresholds
+    }
+    BmsRegister.BMSPROT -> {
+      u32 protection [display: hex]  // Protection settings
+    }
+    BmsRegister.BMSMODE -> {
+      u32 mode [display: hex]  // Ship mode bit
+    }
+    BmsRegister.BMSCMD -> {
+      u32 command [display: hex]  // Reset commands (HW/SW reset bits)
+    }
+  }
+}

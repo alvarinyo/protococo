@@ -1,0 +1,16 @@
+// BICP Full Protocol Stack
+// Stack: DL -> TL -> NL -> AL
+//
+// Use this for the original BICP implementation with all layers.
+// Entry point: dl_frame
+//
+// Layer structure:
+//   DL: CRC protection
+//   TL: Reliable delivery with ACK/retransmit
+//   NL: Fragmentation/reassembly
+//   AL: Device multiplexing
+
+version 1.0
+endian le
+
+include "dl.coco"

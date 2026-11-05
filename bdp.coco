@@ -1,0 +1,21 @@
+#protococo_version=0.2.0
+
+[binary_data_packet_1byte]
+02      $STX
+23      $BINARY DATA PACKET
+XX      $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+XXXX    $CHECKSUM
+03      $ETX
+
+[binary_data_packet_2byte]
+02      $STX
+25      $BINARY DATA PACKET
+XXXX    $MESSAGE BODY LENGTH, lengthof MESSAGE BODY, encodedas littleendian
+N       $MESSAGE BODY
+XXXX    $CHECKSUM
+03      $ETX
+
+[mime_chunk]
+XX          $SEQUENCE NUMBER
+N           $MIME DATA

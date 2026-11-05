@@ -1,0 +1,11 @@
+version 1.0
+endian le
+
+// Test integer sub-fields without match
+message test_simple {
+  u16 length {
+    u8 low
+    u8 high
+  }
+  bytes data[length]
+}

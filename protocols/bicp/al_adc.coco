@@ -1,0 +1,45 @@
+// BICP ADC (Analog-to-Digital Converter) Application Layer Messages
+//
+// ADC uses regmap interface with register addresses:
+// - 0x0400: ADCSTC - Still capture register for single conversion
+// - 0x0500: ADCBFCNT - Buffer count register
+// - 0x4000: ADCBF - Buffer register (16 bytes: timestamp + channel + conversion)
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Reference: /home/alvaroluis/s/blue-icp/kernel_modules/bicp-adc.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// ADC register addresses
+enum AdcRegister : bits[15] {
+  ADCSTC = 0x0400,    // Still capture (single conversion)
+  ADCBFCNT = 0x0500,  // Buffer count
+  ADCBF = 0x4000      // Buffer register
+}
+
+// ADC regmap message (wire format sent over AL)
+message adc_regmap {
+  RWFlag rw_flag
+  AdcRegister reg_addr
+
+  bytes data[] match reg_addr {
+    AdcRegister.ADCSTC -> {
+      u32 conversion [display: hex]  // 12-bit conversion value
+    }
+    AdcRegister.ADCBFCNT -> {
+      u32 buffer_count [display: hex]  // Buffer count
+    }
+    AdcRegister.ADCBF -> {
+      u64 timestamp [display: hex]     // 64-bit timestamp
+      u32 channel_reserved [display: hex]  // Channel (8-bit) + reserved (24-bit)
+      u32 conversion [display: hex]    // Conversion value
+    }
+  }
+}

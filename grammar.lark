@@ -51,16 +51,19 @@ message_item: field_def
 
 // === Fields ===
 // Fields always have a type followed by a name
-field_def: integer_type endian_suffix? IDENT default_value? offset_spec? match_clause? attributes?  -> int_field
-         | BYTES_KW IDENT size_spec? default_value? offset_spec? match_clause? attributes?  -> bytes_field
+field_def: integer_type endian_suffix? IDENT structure_body? default_value? offset_spec? match_clause? attributes?  -> int_field
+         | BYTES_KW IDENT size_spec? structure_body? default_value? offset_spec? match_clause? attributes?  -> bytes_field
          | STRING_KW string_encoding? IDENT size_spec? default_value? offset_spec? match_clause? attributes?  -> string_field
          | PAD_KW size_spec? default_value? offset_spec? attributes?  -> pad_field
+         | BIT_KW IDENT default_value? offset_spec? match_clause? attributes?  -> bit_field
          | bitfield_type IDENT bitfield_body? offset_spec? match_clause? attributes?  -> bitfield
          | IDENT IDENT size_spec? default_value? offset_spec? match_clause? attributes?  -> typed_field
 
+structure_body: "{" message_body "}"
+
 bitfield_body: "{" bitfield_member+ "}"
-bitfield_member: BIT_KW IDENT
-               | BITS_KW "[" DEC_NUMBER "]" IDENT
+bitfield_member: BIT_KW IDENT default_value? attributes?
+               | BITS_KW "[" DEC_NUMBER "]" IDENT default_value? attributes?
 
 integer_type: INT_TYPE
 
@@ -91,7 +94,7 @@ GREEDY_SIZE.2: "..."  // Higher priority than operators
           | size_term "*" size_factor  -> size_mul
 
 ?size_factor: DEC_NUMBER     // literal: 8
-            | field_ref      // field reference: length or header.total_length
+            | field_ref      // field reference or constant: length, header.total_length, BICP_DL_FRAME_SIZE
             | "(" size_expr ")"
 
 field_ref: IDENT ("." IDENT)*
@@ -145,7 +148,7 @@ offset_of_attr: "offset_of" ":" IDENT
 display_format: IDENT
 
 // === Base Types (for enum declarations) ===
-base_type: INT_TYPE
+base_type: INT_TYPE | bitfield_type
 
 // === Terminals ===
 // Keywords must be defined before IDENT to take priority

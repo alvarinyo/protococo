@@ -1,0 +1,32 @@
+// BICP Application Layer (AL)
+// Provides device multiplexing and routing
+//
+// Frame structure (al_frame_t from bicp_config.h):
+// | dev_id (1 byte) | payload (variable) |
+//
+// The payload size is device-specific and determined by NL's length field.
+// AL header is just 1 byte (devId).
+//
+// Reference: /home/alvaroluis/s/blue-icp/include/bicp_config.h:45-53
+//            /home/alvaroluis/s/blue-icp/src/al/al.c
+
+version 1.0
+endian le
+
+include "bicp_devices.coco"
+include "al_rtc.coco"
+
+// AL message with device-specific payload dispatch
+layer message al {
+  BicpDeviceId dev_id        // Device ID (0-254, 0xFF reserved for padding)
+
+  // Dispatch to device-specific payload based on dev_id
+  bytes payload[] match dev_id {
+    BicpDeviceId.RTC -> {
+      rtc_regmap rtc         // RTC regmap message (register + data)
+    }
+    _ -> {
+      // Default: generic payload for other devices (to be defined incrementally)
+    }
+  }
+}

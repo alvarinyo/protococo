@@ -18,9 +18,9 @@
 ├── [1mquestions[0m: [1 items]
 │   └── [0]:
 │       ├── [1mqname[0m:
-│       │   ├── label_data: [92m676f6f676c65[0m
+│       │   ├── label_data: [92m0x676f6f676c65[0m
 │       │   └── [1mnext[0m:
-│       │       ├── label_data: [92m636f6d[0m
+│       │       ├── label_data: [92m0x636f6d[0m
 │       │       └── [1mnext[0m:
 │       │           └── label_length: [92m0000[0m
 │       ├── qtype: [92m0010[0m
@@ -33,6 +33,6 @@
 │       ├── rr_class: [92m0001[0m
 │       ├── ttl: [92m0000010e[0m
 │       ├── rd_length: [92m0010[0m
-│       └── rdata: [92m0f763d7370663120707472203f616c6c[0m
+│       └── rdata: [92m0x0f763d7370663120707472203f616c6c[0m
 ├── [1mauthority[0m: [0 items]
 └── [1madditional[0m: [0 items]

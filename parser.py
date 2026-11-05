@@ -134,8 +134,14 @@ class CocoTransformer(Transformer):
         return list(items)
 
     def base_type(self, items):
-        # items[0] is already a string from INT_TYPE
-        return items[0]
+        # items[0] is either a string from INT_TYPE or BitFieldType from bitfield_type
+        item = items[0]
+        if isinstance(item, BitFieldType):
+            # Convert BitFieldType to string format: "bits[N]"
+            return f"bits[{item.bit_count}]"
+        else:
+            # Already a string from INT_TYPE
+            return item
 
     def enum_def(self, items):
         name, base_type, members = items
@@ -454,6 +460,10 @@ class CocoTransformer(Transformer):
 
     # === Fields ===
 
+    def structure_body(self, items):
+        """Handle structure body: { fields... }"""
+        return list(items[0])  # items[0] is message_body (list of fields)
+
     def int_field(self, items):
         """Handle integer field: u8/u16/... field_name ..."""
         from coco_ast import OffsetSpec
@@ -471,8 +481,11 @@ class CocoTransformer(Transformer):
         offset = None
         match = None
         attrs = None
+        struct_body = None
         for item in items[idx:]:
-            if isinstance(item, MatchClause):
+            if isinstance(item, list) and all(isinstance(f, Field) for f in item):
+                struct_body = item  # Structure body (list of fields)
+            elif isinstance(item, MatchClause):
                 match = item
             elif isinstance(item, FieldAttributes):
                 attrs = item
@@ -489,6 +502,7 @@ class CocoTransformer(Transformer):
             default_value=default,
             match_clause=match,
             attributes=attrs,
+            structure_body=struct_body,
         )
 
     def bytes_field(self, items):
@@ -503,9 +517,12 @@ class CocoTransformer(Transformer):
         offset = None
         match = None
         attrs = None
+        struct_body = None
 
         for item in items[idx:]:
-            if isinstance(item, OffsetSpec):
+            if isinstance(item, list) and all(isinstance(f, Field) for f in item):
+                struct_body = item  # Structure body (list of fields)
+            elif isinstance(item, OffsetSpec):
                 offset = item.expr
             elif isinstance(item, (LiteralSize, FieldRefSize, VariableSize, GreedySize, SizeExpr, FillToSize, UntilSize, BranchDeterminedSize)):
                 size = item
@@ -527,6 +544,7 @@ class CocoTransformer(Transformer):
             default_value=default,
             match_clause=match,
             attributes=attrs,
+            structure_body=struct_body,
         )
 
     def string_field(self, items):
@@ -613,14 +631,31 @@ class CocoTransformer(Transformer):
         return "bits"
 
     def bitfield_member(self, items):
-        """Handle bit field member: bit name or bits[N] name"""
+        """Handle bit field member: bit name [= value] [attributes] or bits[N] name [= value] [attributes]"""
+        from coco_ast import FieldAttributes
+
         if items[0] == "bit":
-            # Single bit: bit name
-            return BitField(name=items[1], bit_count=1)
+            # Single bit: bit name [= value] [attributes]
+            # items = ["bit", name] or ["bit", name, default_value] or ["bit", name, default_value, attributes]
+            default_val = None
+            attrs = None
+            for item in items[2:]:
+                if isinstance(item, FieldAttributes):
+                    attrs = item
+                else:
+                    default_val = item
+            return BitField(name=items[1], bit_count=1, default_value=default_val, attributes=attrs)
         else:
-            # Multiple bits: bits[N] name
-            # items = ["bits", N, name]
-            return BitField(name=items[2], bit_count=items[1])
+            # Multiple bits: bits[N] name [= value] [attributes]
+            # items = ["bits", N, name] or ["bits", N, name, default_value] or ["bits", N, name, default_value, attributes]
+            default_val = None
+            attrs = None
+            for item in items[3:]:
+                if isinstance(item, FieldAttributes):
+                    attrs = item
+                else:
+                    default_val = item
+            return BitField(name=items[2], bit_count=items[1], default_value=default_val, attributes=attrs)
 
     def bitfield_body(self, items):
         """Handle bitfield body: { bit_members... }"""
@@ -656,6 +691,38 @@ class CocoTransformer(Transformer):
             offset=offset,
             match_clause=match,
             attributes=attrs,
+        )
+
+    def bit_field(self, items):
+        """Handle standalone bit field: bit name [= value] [@ offset] [match] [attributes]"""
+        from coco_ast import BitFieldType, OffsetSpec
+
+        # items[0] is "bit" keyword (from BIT_KW), items[1] is the field name
+        name = items[1]
+        default_value = None
+        offset_spec = None
+        match_clause = None
+        attributes = None
+
+        # Parse remaining items
+        for item in items[2:]:
+            if isinstance(item, OffsetSpec):
+                offset_spec = item
+            elif isinstance(item, MatchClause):
+                match_clause = item
+            elif isinstance(item, FieldAttributes):
+                attributes = item
+            elif isinstance(item, (int, str, EnumValue)):
+                default_value = item
+
+        # Treat 'bit name' as 'bits[1] name'
+        return Field(
+            name=name,
+            type=BitFieldType(bit_count=1),
+            default_value=default_value,
+            offset=offset_spec.expr if offset_spec else None,
+            match_clause=match_clause,
+            attributes=attributes
         )
 
     def typed_field(self, items):

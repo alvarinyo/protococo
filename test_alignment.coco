@@ -1,0 +1,13 @@
+version 1.0
+endian be
+
+message align_fail {
+  bits[2] flag
+  u8 value
+}
+
+message align_ok {
+  bits[2] flag
+  bits[6] padding
+  u8 value
+}

@@ -1,0 +1,18 @@
+version 1.0
+endian le
+
+// Test integer sub-fields
+message test_msg {
+  u16 length {
+    u8 low
+    u8 high
+  }
+  match length.low {
+    0xFF -> {
+      // Padding marker
+    }
+    _ -> {
+      bytes data[length]
+    }
+  }
+}

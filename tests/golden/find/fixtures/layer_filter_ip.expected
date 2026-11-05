@@ -1,8 +1,8 @@
-[1m[92m[ip:udp:dns][0m
+[1m[92m[ipv4:udp:dns][0m
 
 ├── [1mheader[0m:
-│   ├── dst_mac: [92mFF:FF:FF:FF:FF:FF[0m
-│   ├── src_mac: [92m00:11:22:33:44:55[0m
+│   ├── dst_mac: [92m0xFF:FF:FF:FF:FF:FF[0m
+│   ├── src_mac: [92m0x00:11:22:33:44:55[0m
 │   └── ethertype: [92m2048 (EtherType.IPV4)[0m
 └── [1mip[0m:
     ├── [1mheader[0m:

@@ -1,0 +1,69 @@
+// BICP IMU (Inertial Measurement Unit) Application Layer Messages
+//
+// IMU uses regmap interface with register addresses:
+// - 0x00: IMUIMID - IMU ID register
+// - 0x01: IMUCTL - Control register (ODR, accelerometer/gyro scale)
+// - 0x03: IMUACCSTC - Accelerometer still capture (3 x 16-bit components)
+// - 0x04: IMUGYRSTC - Gyroscope still capture (3 x 16-bit components)
+// - 0x05: IMUTMPSTC - Temperature still capture (16-bit)
+// - 0x06: IMUBUFCNT - Buffer count register
+// - 0x4000: IMUBUF - Buffer register (12 bytes: payload + tag)
+// - 0x02: IMUBUFWMT - Buffer watermark register
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Reference: /home/alvaroluis/s/blue-icp/kernel_modules/bicp-imu.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// IMU register addresses
+enum ImuRegister : bits[15] {
+  IMUIMID = 0x00,      // IMU ID
+  IMUCTL = 0x01,       // Control register
+  IMUBUFWMT = 0x02,    // Buffer watermark
+  IMUACCSTC = 0x03,    // Accelerometer still capture
+  IMUGYRSTC = 0x04,    // Gyroscope still capture
+  IMUTMPSTC = 0x05,    // Temperature still capture
+  IMUBUFCNT = 0x06,    // Buffer count
+  IMUBUF = 0x4000      // Buffer register
+}
+
+// IMU regmap message (wire format sent over AL)
+message imu_regmap {
+  RWFlag rw_flag
+  ImuRegister reg_addr
+
+  bytes data[] match reg_addr {
+    ImuRegister.IMUIMID -> {
+      u32 imu_id [display: hex]  // IMU identifier (0x6C for STLSM6DSO)
+    }
+    ImuRegister.IMUCTL -> {
+      u32 control [display: hex]  // ODR, ACC_XL, GYR_XL fields
+    }
+    ImuRegister.IMUBUFWMT -> {
+      u32 watermark [display: hex]  // Buffer watermark value
+    }
+    ImuRegister.IMUACCSTC -> {
+      u64 accel_data [display: hex]  // 3x16-bit (x,y,z) + reserved
+    }
+    ImuRegister.IMUGYRSTC -> {
+      u64 gyro_data [display: hex]  // 3x16-bit (x,y,z) + reserved
+    }
+    ImuRegister.IMUTMPSTC -> {
+      u32 temp_data [display: hex]  // 16-bit temp + reserved
+    }
+    ImuRegister.IMUBUFCNT -> {
+      u32 buffer_count [display: hex]  // Buffer count (10-bit field)
+    }
+    ImuRegister.IMUBUF -> {
+      u64 payload_low [display: hex]   // Lower 64 bits of payload
+      u32 payload_high_tag [display: hex]  // Upper bits + tag (2-bit)
+    }
+  }
+}

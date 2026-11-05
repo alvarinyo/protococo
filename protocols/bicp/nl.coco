@@ -1,0 +1,49 @@
+// BICP Network Layer (NL)
+// Handles message fragmentation and reassembly
+//
+// Frame structure:
+// | length (2 bytes, LE) | AL message (length bytes) |
+//
+// The length field specifies the AL message size (dev_id + payload).
+// Multiple NL frames can be packed in a TL payload, separated by 0xFF padding.
+//
+// NL detects padding by checking if the first byte (length low byte) is 0xFF.
+// When 0xFF is encountered, the rest of the buffer is all 0xFF padding.
+//
+// Reference: /home/alvaroluis/s/blue-icp/src/nl/nl.c:247-306, line 318-323
+//            /home/alvaroluis/s/blue-icp/include/bicp_config.h
+
+version 1.0
+endian le
+
+include "bicp_common.coco"
+include "al.coco"
+
+// Single NL frame (for standalone parsing)
+layer message nl_frame {
+  u16 length                 // Size of AL message (dev_id + payload)
+  bytes al_bytes[length] {   // AL payload buffer (length bytes)
+    al al_msg                // Parse single AL message from buffer
+  }
+}
+
+// NL stream with multiple frames + padding)
+// Parses NL frames until hitting 0xFF padding marker
+layer message nl_stream {
+  u16 length {
+    u8 low [display: hex]
+    u8 high [display: hex]
+  }
+  match length.low {
+    0xFF -> {
+      // Padding marker - rest of buffer is 0xFF padding
+    }
+    _ -> {
+      // Valid NL frame: AL message and stream continues
+      bytes al_bytes[length] {
+        al al_msg
+      }
+      nl_stream next         // Recursion for more nl frames in the stream
+    }
+  }
+}

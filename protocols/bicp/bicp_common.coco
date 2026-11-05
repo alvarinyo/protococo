@@ -1,0 +1,19 @@
+// BICP Protocol Stack - Common Definitions
+// Blue ICP inter-processor communication protocol
+//
+// Reference: /home/alvaroluis/s/blue-icp/include/bicp_config.h
+
+version 1.0
+endian le  // All multi-byte fields use little-endian
+
+// DL frame size (256-byte fixed frames for SPI transactions)
+const BICP_DL_FRAME_SIZE = 256
+
+// Frame magic byte used by TL and MDLL2
+const BICP_FRAME_MAGIC = 0xD0
+
+// TL sequence number maximum (6 bits = 0-63)
+const BICP_FRAME_SEQ_NO_MAX = 0x3F
+
+// Dummy fill byte for padding
+const BICP_DUMMY_FILL = 0xFF

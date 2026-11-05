@@ -1,0 +1,25 @@
+version 1.0
+endian be
+
+message ethernet_header {
+  bytes dst_mac[6]
+  bytes src_mac[6]
+  u16 ethertype
+}
+
+message ethernet_base {
+  ethernet_header eth
+  bytes payload[46] // Fixed for simplicity in test
+  pad[fill_to: 60]
+  bytes trailer[...]
+}
+
+layer message ethernet_frame extends ethernet_base {
+  trailer { }
+}
+
+layer message ethernet_frame_with_fcs extends ethernet_base {
+  trailer {
+    u32 fcs
+  }
+}

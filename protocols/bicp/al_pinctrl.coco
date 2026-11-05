@@ -1,0 +1,104 @@
+// BICP PINCTRL/GPIO Application Layer Messages
+//
+// PINCTRL uses regmap interface with register addresses (per bank):
+// - 0x00+n: GPIOBnVAL - GPIO value register (32-bit bitmap)
+// - 0x02+n: GPIOBnDIR - GPIO direction register (32-bit bitmap)
+// - 0x04+n: GPIOBnMODE - GPIO mode register (32-bit bitmap)
+// - 0x06+n: GPIOBnPULL - GPIO pull configuration (64-bit, 2 bits per pin!)
+// - 0x08+n: GPIOnIE - GPIO interrupt enable
+// - 0x0A+n: GPIOnIM - GPIO interrupt mask
+// - 0x0C+n: GPIOnIS - GPIO interrupt sense
+//
+// Note: Two banks (0 and 1), 32 pins per bank
+// Pull register is 64-bit with 2 bits per pin
+//
+// Wire format: [reg_addr (2 bytes LE)][data (variable)]
+//
+// Reference: /home/alvaroluis/s/blue-icp/kernel_modules/bicp-pinctrl.c
+
+version 1.0
+endian le
+
+enum RWFlag : bits[1] {
+  READ = 0x00,
+  WRITE = 0x01
+}
+
+// GPIO/PINCTRL register addresses (bank-based)
+enum GpioRegister : bits[15] {
+  // Bank 0 registers
+  GPIOB0VAL = 0x00,    // Bank 0 value (32-bit bitmap)
+  GPIOB0DIR = 0x02,    // Bank 0 direction (32-bit bitmap)
+  GPIOB0MODE = 0x04,   // Bank 0 mode (32-bit bitmap)
+  GPIOB0PULL = 0x06,   // Bank 0 pull config (64-bit, 2 bits/pin)
+  GPIO0IE = 0x08,      // Bank 0 interrupt enable
+  GPIO0IM = 0x0A,      // Bank 0 interrupt mask
+  GPIO0IS = 0x0C,      // Bank 0 interrupt sense
+
+  // Bank 1 registers
+  GPIOB1VAL = 0x01,    // Bank 1 value (32-bit bitmap)
+  GPIOB1DIR = 0x03,    // Bank 1 direction (32-bit bitmap)
+  GPIOB1MODE = 0x05,   // Bank 1 mode (32-bit bitmap)
+  GPIOB1PULL = 0x07,   // Bank 1 pull config (64-bit, 2 bits/pin)
+  GPIO1IE = 0x09,      // Bank 1 interrupt enable
+  GPIO1IM = 0x0B,      // Bank 1 interrupt mask
+  GPIO1IS = 0x0D       // Bank 1 interrupt sense
+}
+
+// GPIO/PINCTRL regmap message (wire format sent over AL)
+message gpio_regmap {
+  RWFlag rw_flag
+  GpioRegister reg_addr
+
+  bytes data[] match reg_addr {
+    // Bank 0 - 32-bit registers
+    GpioRegister.GPIOB0VAL -> {
+      u32 value [display: hex]  // Pin values (1 bit per pin)
+    }
+    GpioRegister.GPIOB0DIR -> {
+      u32 direction [display: hex]  // Pin directions (1 bit per pin)
+    }
+    GpioRegister.GPIOB0MODE -> {
+      u32 mode [display: hex]  // Pin modes: push-pull/open-drain (1 bit per pin)
+    }
+    GpioRegister.GPIO0IE -> {
+      u32 irq_enable [display: hex]  // Interrupt enable (1 bit per pin)
+    }
+    GpioRegister.GPIO0IM -> {
+      u32 irq_mask [display: hex]  // Interrupt mask (1 bit per pin)
+    }
+    GpioRegister.GPIO0IS -> {
+      u32 irq_sense [display: hex]  // Interrupt sense (1 bit per pin)
+    }
+
+    // Bank 0 - 64-bit pull register
+    GpioRegister.GPIOB0PULL -> {
+      u64 pull_config [display: hex]  // Pull configuration (2 bits per pin)
+    }
+
+    // Bank 1 - 32-bit registers
+    GpioRegister.GPIOB1VAL -> {
+      u32 value [display: hex]  // Pin values (1 bit per pin)
+    }
+    GpioRegister.GPIOB1DIR -> {
+      u32 direction [display: hex]  // Pin directions (1 bit per pin)
+    }
+    GpioRegister.GPIOB1MODE -> {
+      u32 mode [display: hex]  // Pin modes: push-pull/open-drain (1 bit per pin)
+    }
+    GpioRegister.GPIO1IE -> {
+      u32 irq_enable [display: hex]  // Interrupt enable (1 bit per pin)
+    }
+    GpioRegister.GPIO1IM -> {
+      u32 irq_mask [display: hex]  // Interrupt mask (1 bit per pin)
+    }
+    GpioRegister.GPIO1IS -> {
+      u32 irq_sense [display: hex]  // Interrupt sense (1 bit per pin)
+    }
+
+    // Bank 1 - 64-bit pull register
+    GpioRegister.GPIOB1PULL -> {
+      u64 pull_config [display: hex]  // Pull configuration (2 bits per pin)
+    }
+  }
+}

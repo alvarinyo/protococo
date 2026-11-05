@@ -170,6 +170,12 @@ def collect_field_metadata(decoder: Decoder, msg, prefix: str = "", visited_coun
                     if branch.fields:
                         collect_from_fields(branch.fields, nested_prefix, current_visited)
 
+            # Check for bitfield body - collect metadata for bitfield members
+            if field.bitfield_body:
+                for bf_member in field.bitfield_body.fields:
+                    bf_key = f"{nested_prefix}{bf_member.name}"
+                    metadata[bf_key] = bf_member
+
     collect_from_fields(fields, prefix, new_visited)
     return metadata
 
@@ -196,6 +202,38 @@ class AnsiColors:
         '\033[48;5;23m',   # Layer 5: dark cyan
     ]
     BG_RESET = '\033[49m'
+
+
+def format_protocol_chain_with_colors(protocol_chain: list, layer_colors_enabled: bool, is_valid: bool = True) -> str:
+    """Format protocol chain with layer background colors.
+
+    Args:
+        protocol_chain: List of layer names (e.g., ["dl", "tl", "nl_stream"])
+        layer_colors_enabled: Whether to apply layer colors
+        is_valid: Whether the message is valid (affects bracket color)
+
+    Returns:
+        Formatted string like "[dl:tl:nl_stream]" with colors
+    """
+    if not protocol_chain:
+        return ""
+
+    # Build the chain string with layer colors
+    if layer_colors_enabled:
+        colored_parts = []
+        for i, layer_name in enumerate(protocol_chain):
+            bg_color = AnsiColors.LAYER_BG[i % len(AnsiColors.LAYER_BG)]
+            colored_parts.append(f"{bg_color}{layer_name}{AnsiColors.BG_RESET}")
+        chain_content = ":".join(colored_parts)
+
+        # Brackets are bold green/red without background
+        bracket_color = AnsiColors.BOLD + AnsiColors.OKGREEN if is_valid else AnsiColors.BOLD + AnsiColors.FAIL
+        return f"{bracket_color}[{AnsiColors.ENDC}{chain_content}{bracket_color}]{AnsiColors.ENDC}"
+    else:
+        # No layer colors: just simple colored chain
+        chain_content = ":".join(protocol_chain)
+        color = AnsiColors.BOLD + AnsiColors.OKGREEN if is_valid else AnsiColors.BOLD + AnsiColors.FAIL
+        return f"{color}[{chain_content}]{AnsiColors.ENDC}"
 
 
 def field_matches_filter(field_name: str, field_path: str, filter_fields: list) -> bool:
@@ -638,6 +676,16 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
         hex_val = field_result.hex_value
         decoded = field_result.decoded_value
 
+        # Check if this is a bytes field (should prefix hex with 0x)
+        from coco_ast import BytesType
+        is_bytes_field = metadata and hasattr(metadata, 'type') and isinstance(metadata.type, BytesType)
+
+        def prefix_hex(val: str) -> str:
+            """Prefix hex string with 0x for bytes fields."""
+            if is_bytes_field and val and not val.startswith("0x"):
+                return f"0x{val}"
+            return val
+
         # Show "(none)" for empty fields (0 bytes) when decoding
         if decode and (not hex_val or len(hex_val) == 0):
             return "(none)"
@@ -648,12 +696,20 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             if isinstance(decoded, dict):
                 return None
             # For leaf nodes, return raw hex
-            return truncate_field_value(hex_val, field_bytes_limit)
+            return prefix_hex(truncate_field_value(hex_val, field_bytes_limit))
 
         # decode=True: apply formatters and use decoded value
         if metadata and metadata.attributes and metadata.attributes.display:
+            from coco_ast import BitField, BitFieldType
             fmt_name = metadata.attributes.display.name
-            formatted = formatters.format_value(fmt_name, hex_val, decoded_value=decoded)
+            # Extract bit_count from BitField members or BitFieldType fields
+            if isinstance(metadata, BitField):
+                bit_count = metadata.bit_count
+            elif hasattr(metadata, 'type') and isinstance(metadata.type, BitFieldType):
+                bit_count = metadata.type.bit_count
+            else:
+                bit_count = None
+            formatted = formatters.format_value(fmt_name, hex_val, decoded_value=decoded, bit_count=bit_count)
             if formatted:
                 return formatted  # Formatted values (like IP addresses) are not truncated
 
@@ -668,12 +724,12 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 if formatted != decoded:
                     # It was formatted as an enum, don't truncate
                     return formatted
-                # Check if it looks like hex or plain text
-                return truncate_field_value(decoded, field_bytes_limit)
+                # For bytes fields, prefix hex string with 0x
+                return prefix_hex(truncate_field_value(decoded, field_bytes_limit))
             else:
                 return str(decoded)
 
-        return truncate_field_value(hex_val, field_bytes_limit)
+        return prefix_hex(truncate_field_value(hex_val, field_bytes_limit))
 
     def build_prefix(ancestors: list[bool], layer_stack: list[int] = None) -> str:
         """Build prefix string from ancestor continuation flags.
@@ -749,6 +805,21 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
 
         # Check if this field is a layer field - use its position in the chain
         field_layer_idx = layer_positions.get(name, -1)
+
+        # If not found by field name, check if field type is a layer message
+        if field_layer_idx < 0 and metadata and coco_file:
+            from coco_ast import EnumTypeRef
+            if isinstance(metadata.type, EnumTypeRef):
+                msg_type_name = metadata.type.enum_name
+                msg_def = coco_file.get_message(msg_type_name)
+                if msg_def and msg_def.is_layer:
+                    # Apply same name transformation as analyzer._get_chain_name
+                    chain_name = msg_type_name
+                    for suffix in ('_frame', '_packet', '_segment', '_datagram', '_message'):
+                        if chain_name.endswith(suffix):
+                            chain_name = chain_name[:-len(suffix)]
+                            break
+                    field_layer_idx = layer_positions.get(chain_name, -1)
 
         # Determine layer for nested content
         # If this field IS a layer, nested content uses its layer color
@@ -860,6 +931,23 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
             # Check if this field is a layer field - use its position in the chain
             layer_idx = layer_positions.get(k, -1)
 
+            # If not found by field name, check if field type is a layer message
+            if layer_idx < 0 and coco_file:
+                field_meta = fields_metadata.get(field_path) if fields_metadata else None
+                if field_meta and hasattr(field_meta, 'type'):
+                    from coco_ast import EnumTypeRef
+                    if isinstance(field_meta.type, EnumTypeRef):
+                        msg_type_name = field_meta.type.enum_name
+                        msg_def = coco_file.get_message(msg_type_name)
+                        if msg_def and msg_def.is_layer:
+                            # Apply same name transformation as analyzer._get_chain_name
+                            chain_name = msg_type_name
+                            for suffix in ('_frame', '_packet', '_segment', '_datagram', '_message'):
+                                if chain_name.endswith(suffix):
+                                    chain_name = chain_name[:-len(suffix)]
+                                    break
+                            layer_idx = layer_positions.get(chain_name, -1)
+
             # Determine layer to add to stack for this field's nested content
             # Only changes if this field IS a layer - then children use the new layer color
             if layer_idx >= 0:
@@ -937,6 +1025,17 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 color = AnsiColors.OKGREEN
                 skip_truncation = False
 
+                # Look up metadata for this field
+                metadata = None
+                if fields_metadata:
+                    # Strip array indices from field_path for metadata lookup
+                    field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
+                    metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
+
+                # Check if this is a bytes field (should prefix hex with 0x)
+                from coco_ast import BytesType
+                is_bytes_field = metadata and hasattr(metadata, 'type') and isinstance(metadata.type, BytesType)
+
                 # Choose hex or decoded value based on decode flag
                 if not decode:
                     formatted_value = hex_val
@@ -944,16 +1043,25 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                     formatted_value = actual_val
 
                     # Try to apply display formatter from metadata
-                    if fields_metadata:
-                        # Strip array indices from field_path for metadata lookup
-                        field_path_no_indices = re.sub(r'\[\d+\]', '', field_path)
-                        metadata = fields_metadata.get(field_path_no_indices) or fields_metadata.get(field_path) or fields_metadata.get(k)
-                        if metadata and metadata.attributes and metadata.attributes.display:
-                            fmt_name = metadata.attributes.display.name
-                            formatted = formatters.format_value(fmt_name, hex_val)
-                            if formatted:
-                                formatted_value = formatted
-                                skip_truncation = True  # Don't truncate formatted values (like IP addresses)
+                    if metadata and metadata.attributes and metadata.attributes.display:
+                        from coco_ast import BitField, IntegerType, BitFieldType
+                        fmt_name = metadata.attributes.display.name
+                        # Extract bit_count from BitField members or BitFieldType fields
+                        if isinstance(metadata, BitField):
+                            bit_count = metadata.bit_count
+                        elif hasattr(metadata, 'type') and isinstance(metadata.type, BitFieldType):
+                            bit_count = metadata.type.bit_count
+                        else:
+                            bit_count = None
+                        # Get endian from field metadata (for integer fields)
+                        endian = "be"
+                        if hasattr(metadata, 'type') and isinstance(metadata.type, IntegerType):
+                            if metadata.type.endian:
+                                endian = "le" if metadata.type.endian.value == "le" else "be"
+                        formatted = formatters.format_value(fmt_name, hex_val, endian=endian, decoded_value=actual_val, bit_count=bit_count)
+                        if formatted:
+                            formatted_value = formatted
+                            skip_truncation = True  # Don't truncate formatted values (like IP addresses)
 
                     # Apply enum formatting for string values that look like enums
                     if isinstance(formatted_value, str):
@@ -965,6 +1073,10 @@ def get_message_explanation_string_tree(validation_result: ValidationResult, fie
                 # Apply truncation if needed
                 if not skip_truncation and isinstance(formatted_value, str):
                     formatted_value = truncate_field_value(formatted_value, field_bytes_limit)
+
+                # Prefix bytes fields with 0x
+                if is_bytes_field and isinstance(formatted_value, str) and not formatted_value.startswith("0x"):
+                    formatted_value = f"0x{formatted_value}"
 
                 content = f"{k}: {color}{formatted_value}{AnsiColors.ENDC}"
                 lines.append(f"{prefix}{connector}{format_line_content(content, current_layer_idx)}")
@@ -1797,7 +1909,11 @@ def cli_main():
             ret = 1
 
     elif args["check"] == True:
-        messages_input = [sys.stdin.read()] if not args["<message_hex_string>"] else args["<message_hex_string>"]
+        # Use iterator for stdin to enable live/streaming output
+        if args["<message_hex_string>"]:
+            messages_input = args["<message_hex_string>"]
+        else:
+            messages_input = (line.strip() for line in sys.stdin if line.strip())
 
         filter_fields = [f.strip() for f in args["--dissect-fields"].split(",")] if args["--dissect-fields"] is not None else None
 
@@ -1841,9 +1957,14 @@ def cli_main():
 
             if not result.is_valid:
                 ret = 1
+            sys.stdout.flush()  # Ensure immediate output for streaming
 
     elif args["find"] == True:
-        messages_input = sys.stdin.read().split() if not args["<message_hex_string>"] else args["<message_hex_string>"]
+        # Use iterator for stdin to enable live/streaming output
+        if args["<message_hex_string>"]:
+            messages_input = args["<message_hex_string>"]
+        else:
+            messages_input = (line.strip() for line in sys.stdin if line.strip())
         for message_hex_string in messages_input:
             results = decoder.identify_message(message_hex_string)
 
@@ -1917,32 +2038,41 @@ def cli_main():
                 # Use protocol chain if available, otherwise message name
                 if result.protocol_chain:
                     name_string = ":".join(result.protocol_chain)
+                    # Format protocol chain with layer colors if enabled
+                    formatted_chain = format_protocol_chain_with_colors(
+                        result.protocol_chain,
+                        args["--layer-colors"],
+                        result.is_valid
+                    )
                 else:
                     name_string = result.message_name
+                    formatted_chain = color + f"[{name_string}]" + AnsiColors.ENDC
                 number_of_whitespaces = max_name_len - len(name_string) + 2
 
                 if args["--list"] == False:
                     if args["--tree"] or args["--format"] == "tree":
-                        print(color + f"[{name_string}]" + AnsiColors.ENDC)
+                        print(formatted_chain)
                         print(explanation)
                     elif args["--format"] == "oneline" or args["--format"] == "compact":
-                        print(color  + f"[{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
+                        print(formatted_chain + " "*number_of_whitespaces + explanation)
                     else:
-                        print(color  + f"[{name_string}]" + AnsiColors.ENDC)
+                        print(formatted_chain)
                         print(explanation)
                         print()
                     break
                 else:
                     if args["--tree"] or args["--format"] == "tree":
-                        print(color + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
+                        print(color + f"- {i}: " + AnsiColors.ENDC + formatted_chain)
                         print(explanation)
                         print()
                     elif args["--format"] == "oneline" or args["--format"] == "compact":
-                        print(color  + f"{str(i): >8}: [{name_string}]" + AnsiColors.ENDC + " "*number_of_whitespaces + explanation)
+                        print(color  + f"{str(i): >8}: " + AnsiColors.ENDC + formatted_chain + " "*number_of_whitespaces + explanation)
                     else:
-                        print(color  + f"- {i}: [{name_string}]" + AnsiColors.ENDC)
+                        print(color  + f"- {i}: " + AnsiColors.ENDC + formatted_chain)
                         print(explanation)
                         print()
+            sys.stdout.flush()  # Ensure immediate output for streaming
+
     elif args["create"] == True:
         encoder = Encoder(coco_file)
 

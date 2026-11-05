@@ -1,0 +1,47 @@
+// BICP MDLL2 (Modern Data Link Layer 2) / BICEPS
+// Newer data link layer implementation replacing original DL
+// Skips TL layer - goes directly to NL
+//
+// Frame structure:
+// | start_flags (1 byte) | payload_length (2 bytes, LE) | payload (variable) | CRC-16 (2 bytes, LE) |
+//
+// Start_flags byte:
+//   - bits 7-4: 0xD (frame delimiter)
+//   - bit 3: unused
+//   - bit 2: wait_flag
+//   - bit 1: nak_flag
+//   - bit 0: payload_flag
+//
+// Frame types:
+//   - DATA (0xD1): has payload
+//   - EMPTY (0xD0): no payload, implicit ACK
+//   - NAK (0xD2): CRC error, request retransmission
+//   - WAIT (0xD4): node is waiting
+//
+// CRC: CRC-16/AUG-CCITT (little-endian)
+//
+// Reference: /home/alvaroluis/s/blue-icp/src/mdll2/mdll2.c
+
+version 1.0
+endian le
+
+include "nl.coco"
+
+layer message mdll2_frame {
+  bits[8] start_flags {
+    bits[4] delimiter = 0xD   // Frame start marker (fixed to 0xD)
+    bit unused
+    bit wait_flag             // WAIT state
+    bit nak_flag              // NAK (request retransmit)
+    bit payload_flag          // Has payload data
+  }
+
+  u16 payload_length          // Payload length (little-endian)
+
+  bytes payload[payload_length] match start_flags.payload_flag {
+    1 -> nl_frame nl          // Has payload: parse as NL frame
+    _ -> {}                   // Empty/NAK/WAIT frames
+  }
+
+  bytes crc[2]                // CRC-16 AUG-CCITT (little-endian)
+}

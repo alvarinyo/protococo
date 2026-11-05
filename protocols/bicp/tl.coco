@@ -1,0 +1,54 @@
+// BICP Transport Layer (TL)
+// Provides reliable, ordered delivery with acknowledgments and retransmissions
+//
+// Frame structure (within 256-byte DL frame):
+// | magic (1 byte) | seq_no (1 byte) | ack (1 byte) | payload + padding (251 bytes) |
+//
+// The TL frame is always 254 bytes (256-byte DL frame minus 2-byte CRC).
+// NL payload is self-sizing, remaining bytes are 0xFF padding.
+//
+// Seq_no byte:
+//   - bit 7: unused
+//   - bit 6: payload_flag (1 = has payload, 0 = ACK-only)
+//   - bits 5-0: sequence number (0-63)
+//
+// ACK byte:
+//   - bit 7: reset_flag (1 = reset request/ack)
+//   - bit 6: ack_flag (1 = is ACK)
+//   - bits 5-0: ACK sequence number (0-63)
+//
+// Reference: /home/alvaroluis/s/blue-icp/src/tl/tl_container.c
+
+version 1.0
+endian le
+
+include "bicp_common.coco"
+include "nl.coco"
+
+layer message tl_frame {
+  u8 magic = 0xD0 [display: hex]
+
+  bits[8] seq_no {
+    bit unused [display: bin]
+    bit payload_flag [display: bin]
+    bits[6] sequence [display: bin]
+  }
+
+  bits[8] ack {
+    bit reset_flag
+    bit ack_flag
+    bits[6] ack_sequence
+  }
+
+  // TL payload: fixed 251-byte buffer
+  // Contains multiple NL frames followed by 0xFF padding (BICP_DL_FRAME_SIZE - 2 CRC - 3 header)
+  // NL stream recursively parses frames until hitting 0xFF padding marker
+  bytes payload[251] match seq_no.payload_flag {
+    1 -> {
+      nl_stream nl_frames       // Recursive NL frames stream
+    }
+    _ -> {
+      // ACK-only frame: no payload, entire 251 bytes are padding (unparsed)
+    }
+  }
+}

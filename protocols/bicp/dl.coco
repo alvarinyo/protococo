@@ -1,0 +1,26 @@
+// BICP Data Link Layer (DL)
+// Fixed 256-byte frames for SPI transactions
+//
+// Frame structure (256 bytes total):
+// | TL frame (variable) | padding | CRC-16 (2 bytes) |
+//
+// CRC: CRC-16/AUG-CCITT
+//   - Polynomial: 0x1021
+//   - Init: 0x1D0F
+//   - RefIn/RefOut: false
+//   - XorOut: 0x0000
+//
+// Reference: /home/alvaroluis/s/blue-icp/src/dl/dl.c
+
+version 1.0
+endian le
+
+include "tl.coco"
+
+layer message dl_frame {
+  // TL frame (greedy payload will consume remaining bytes up to total frame)
+  tl_frame tl
+
+  // CRC-16 AUG-CCITT (2 bytes, little-endian)
+  bytes crc[2]
+}
