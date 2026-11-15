@@ -1,5 +1,5 @@
 [1m[92m[ethernet_header][0m
 
-├── [1mdst_mac[0m: [92m00e018b10cad[0m
-├── [1msrc_mac[0m: [92m00c09f32418c[0m
+├── [1mdst_mac[0m: [92m0x00e018b10cad[0m
+├── [1msrc_mac[0m: [92m0x00c09f32418c[0m
 └── [1methertype[0m: [92m0800[0m

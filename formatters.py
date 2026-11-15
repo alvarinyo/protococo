@@ -38,20 +38,32 @@ def get_formatter(name: str) -> FormatterFunc | None:
     return _formatters.get(name)
 
 
-def format_value(name: str, hex_value: str, endian: str = "be", decoded_value: Any = None) -> str | None:
-    """Format a value using a named formatter."""
+def format_value(name: str, hex_value: str, endian: str = "be", decoded_value: Any = None, bit_count: int = None) -> str | None:
+    """Format a value using a named formatter.
+
+    Args:
+        name: Formatter name
+        hex_value: Hex string representation
+        endian: Byte order ('be' or 'le')
+        decoded_value: Decoded value (for some formatters)
+        bit_count: Bit count for bitfields (overrides byte_count * 8 for binary formatter)
+    """
     formatter = get_formatter(name)
     if formatter is None:
         return None
     byte_count = len(hex_value) // 2
-    
+
+    # For binary formatter with bit_count, pass it through
+    if name in ("binary", "bin") and bit_count is not None:
+        return format_binary_with_bitcount(hex_value, bit_count, decoded_value=decoded_value)
+
     # Built-in formatters (except dnsname) expect hex strings.
     # dnsname expects the decoded dict.
     if name == "dnsname":
         val_to_format = decoded_value if decoded_value is not None else hex_value
     else:
         val_to_format = hex_value
-        
+
     return formatter(val_to_format, byte_count, endian)
 
 
@@ -120,11 +132,27 @@ def format_decimal(hex_value: str, byte_count: int, endian: str) -> str:
         return hex_value
 
 
-@register("binary")
-def format_binary(hex_value: str, byte_count: int, endian: str) -> str:
-    """Format as binary string."""
+def format_binary_with_bitcount(hex_value: str, bit_count: int, decoded_value: Any = None) -> str:
+    """Format as binary string with 0b prefix, padded to specific bit count."""
     try:
-        value = int(hex_value, 16)
+        # Use decoded_value if available (already has correct endianness applied)
+        if decoded_value is not None and isinstance(decoded_value, int):
+            value = decoded_value
+        else:
+            value = int(hex_value, 16)
+        return f"0b{value:0{bit_count}b}"
+    except (ValueError, TypeError):
+        return hex_value
+
+
+@register("binary")
+@register("bin")
+def format_binary(hex_value: str, byte_count: int, endian: str) -> str:
+    """Format as binary string with 0b prefix."""
+    try:
+        raw_bytes = bytes.fromhex(hex_value)
+        byteorder = 'little' if endian == 'le' else 'big'
+        value = int.from_bytes(raw_bytes, byteorder=byteorder)
         return f"0b{value:0{byte_count * 8}b}"
     except ValueError:
         return hex_value

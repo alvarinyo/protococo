@@ -25,6 +25,6 @@
 │       ├── rr_class: [92m1 (DnsQClass.IN)[0m
 │       ├── ttl: [92m270[0m
 │       ├── rd_length: [92m16[0m
-│       └── rdata: [92m0f763d7370663120707472203f616c6c[0m
+│       └── rdata: [92m0x0f763d7370663120707472203f616c6c[0m
 ├── [1mauthority[0m: [0 items]
 └── [1madditional[0m: [0 items]

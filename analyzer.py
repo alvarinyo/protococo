@@ -260,6 +260,8 @@ class Decoder:
         self.jump_depth = 0        # Current recursive jump depth
         self.MAX_JUMP_DEPTH = 20   # Safety limit
         self.jumped_offsets = set() # Track visited bit offsets to detect loops
+        self.message_recursion_stack = []  # Track (msg_name, bit_offset) to detect recursion loops
+        self.MAX_MESSAGE_DEPTH = 50  # Safety limit for message recursion
 
     @contextmanager
     def _jump_to(self, target_bits: int):
@@ -566,8 +568,14 @@ class Decoder:
             return DecodeResult(name=field.name, hex_value="", decoded_value=None, is_valid=True)
 
         # --- Strict Alignment Validation ---
-        is_byte_oriented = isinstance(field_type, (IntegerType, BytesType, StringType, PadType, EnumTypeRef))
-        
+        is_byte_oriented = isinstance(field_type, (IntegerType, BytesType, StringType, PadType))
+
+        # EnumTypeRef is byte-oriented ONLY if its base type is not bit-aligned
+        if isinstance(field_type, EnumTypeRef):
+            enum_def = self.get_enum(field_type.enum_name)
+            if enum_def and not enum_def.base_type.startswith("bits["):
+                is_byte_oriented = True
+
         if is_byte_oriented and not self._is_aligned():
             errors.append(f"Alignment Error: Field '{field.name}' ({field_type}) must be byte-aligned. Current bit offset: {self.bit_offset}")
             return DecodeResult(
@@ -621,17 +629,52 @@ class Decoder:
 
         decoded_value = None
         is_valid = True
+        promoted_fields = {}
 
         # Decode based on type
         if isinstance(field_type, IntegerType):
-            decoded_value, ok = self.decode_integer(field_type)
-            if not ok:
-                is_valid = False
-                errors.append("Failed to decode integer")
+            # If the integer has sub-fields, decode them
+            if field.structure_body:
+                # Read the integer value first (for use in expressions/sizes)
+                int_value, ok = self.decode_integer(field_type)
+                if not ok:
+                    is_valid = False
+                    errors.append("Failed to decode integer")
+                else:
+                    # Rewind to decode sub-fields
+                    saved_offset = self.bit_offset
+                    self.bit_offset = start_bit_offset
+
+                    # Decode sub-fields as a nested structure
+                    sub_fields = {}
+                    for sub_field in field.structure_body:
+                        sub_result = self.decode_field(sub_field, context)
+                        if not sub_result.is_valid:
+                            is_valid = False
+                            errors.extend(sub_result.errors)
+                        sub_fields[sub_field.name] = FieldValue(sub_result.hex_value, sub_result.decoded_value)
+
+                    # Restore offset after decoding sub-fields
+                    self.bit_offset = saved_offset
+
+                    # The decoded_value remains the integer for use in size expressions
+                    # (e.g., bytes data[length] works because length resolves to int_value)
+                    decoded_value = int_value
+
+                    # Promote sub-fields to context for matching (e.g., match length.low { ... })
+                    # Store sub-fields as nested dict under field name
+                    for sub_name, sub_val in sub_fields.items():
+                        promoted_fields[sub_name] = sub_val
             else:
-                # For bit-level integers, use value-based hex
-                if field_type.bit_size < 8:
-                    hex_value = format(decoded_value, 'x')
+                # Regular integer without sub-fields
+                decoded_value, ok = self.decode_integer(field_type)
+                if not ok:
+                    is_valid = False
+                    errors.append("Failed to decode integer")
+                else:
+                    # For bit-level integers, use value-based hex
+                    if field_type.bit_size < 8:
+                        hex_value = format(decoded_value, 'x')
 
             if isinstance(field.type, EnumTypeRef):
                 enum_def = self.get_enum(field.type.enum_name)
@@ -650,18 +693,32 @@ class Decoder:
                 is_valid = False
                 errors.append(f"Not enough bits for bitfield: need {bit_count}")
             else:
-                decoded_value = self._decode_bitfield(int_val, field, (bit_count + 7) // 8)
+                decoded_value, bf_valid, bf_errors = self._decode_bitfield(int_val, field, (bit_count + 7) // 8)
+                if not bf_valid:
+                    is_valid = False
+                    errors.extend(bf_errors)
 
         elif isinstance(field_type, EnumTypeRef):
             enum_def = self.get_enum(field_type.enum_name)
             msg_def = self.coco_file.get_message(field_type.enum_name)
 
             if msg_def and field.size is not None:
-                decoded_value, consumed_bits = self._decode_message_array(msg_def, field, context)
+                # Arrays of layer messages should also appear in protocol chain
+                # Use the message TYPE name, not the field name
+                if self._is_layer_message(msg_def.name):
+                    self._protocol_chain.append(self._get_chain_name(msg_def.name))
+                decoded_value, consumed_bits, nested_chains = self._decode_message_array(msg_def, field, context)
+                # Merge nested protocol chains from array elements
+                if nested_chains:
+                    for chain_part in nested_chains:
+                        if chain_part and chain_part not in self._protocol_chain:
+                            self._protocol_chain.append(chain_part)
                 hex_value = self.data[byte_start : (start_bit_offset + consumed_bits + 7) // 8].hex()
             elif msg_def and field.size is None:
                 if self._is_layer_message(msg_def.name):
-                    self._protocol_chain.append(field.name)
+                    chain_name = self._get_chain_name(msg_def.name)
+                    if chain_name not in self._protocol_chain:
+                        self._protocol_chain.append(chain_name)
                 
                 if field.structure_body:
                     decoded_value, structure_valid = self._decode_structure(
@@ -674,19 +731,38 @@ class Decoder:
                 
                 hex_value = self.data[byte_start : (self.bit_offset + 7) // 8].hex()
             elif enum_def:
-                base_type = IntegerType(base=enum_def.base_type)
-                int_val, ok = self.decode_integer(base_type)
-                if ok:
-                    member = enum_def.get_member_by_value(int_val)
-                    if member:
-                        decoded_value = f"{enum_def.name}.{member.name}"
-                    else:
-                        decoded_value = int_val
+                # Check if enum has bit-based type
+                if enum_def.base_type.startswith("bits["):
+                    # Extract bit count: "bits[15]" -> 15
+                    bit_count = int(enum_def.base_type[5:-1])
+                    int_val = self._read_bits(bit_count)
+
+                    if int_val is None:
                         is_valid = False
-                        errors.append(f"Value {int_val} not in enum {enum_def.name}")
+                        errors.append(f"Not enough bits for enum {enum_def.name}: need {bit_count}")
+                    else:
+                        member = enum_def.get_member_by_value(int_val)
+                        if member:
+                            decoded_value = f"{enum_def.name}.{member.name}"
+                        else:
+                            decoded_value = int_val
+                            is_valid = False
+                            errors.append(f"Value {int_val} not in enum {enum_def.name}")
                 else:
-                    is_valid = False
-                    errors.append("Failed to decode enum value")
+                    # Byte-aligned integer enum
+                    base_type = IntegerType(base=enum_def.base_type)
+                    int_val, ok = self.decode_integer(base_type)
+                    if ok:
+                        member = enum_def.get_member_by_value(int_val)
+                        if member:
+                            decoded_value = f"{enum_def.name}.{member.name}"
+                        else:
+                            decoded_value = int_val
+                            is_valid = False
+                            errors.append(f"Value {int_val} not in enum {enum_def.name}")
+                    else:
+                        is_valid = False
+                        errors.append("Failed to decode enum value")
             else:
                 errors.append(f"Type '{field_type.enum_name}' not found")
                 is_valid = False
@@ -726,8 +802,6 @@ class Decoder:
             self.bit_offset += size_bits
             decoded_value = None
 
-        promoted_fields = {}
-
         # --- Sub-Structure Parsing (Match / Structure Body) ---
         if field.match_clause or field.structure_body:
             if isinstance(field_type, BytesType):
@@ -761,9 +835,11 @@ class Decoder:
                     # Should be clamped already by _decode_fields, but ensure it here too for safety
                     self.bit_offset = start_bit_offset + size_bits
                 # else: consumed_bits == size_bits, already at correct position
-            else:
+            elif not isinstance(field_type, IntegerType):
+                # Non-bytes, non-integer fields (e.g., bitfields, EnumTypeRef)
+                # Note: IntegerType fields with structure_body are handled in the integer decoding section
                 if field.match_clause:
-                    # Attached match on non-bytes field (e.g. u16 or bitfield)
+                    # Attached match on non-bytes field (e.g. bitfield)
                     temp_context = dict(context)
                     temp_context[field.name] = decoded_value
                     if isinstance(decoded_value, dict):
@@ -776,9 +852,25 @@ class Decoder:
                     if not match_valid:
                         is_valid = False
                         errors.append("Match clause validation failed")
-                    # Base field (int/bitfield) decoded_value remains as-is
+                    # Base field (bitfield/etc) decoded_value remains as-is
                 else:
+                    # structure_body on non-bytes, non-integer field
                     decoded_value = self._decode_structure(field.structure_body, context)
+            elif field.match_clause:
+                # IntegerType with match_clause
+                temp_context = dict(context)
+                temp_context[field.name] = decoded_value
+                # Also add promoted sub-fields to temp context for matching on them
+                for sub_name, sub_val in promoted_fields.items():
+                    temp_context[f"{field.name}.{sub_name}"] = sub_val.val if isinstance(sub_val, FieldValue) else sub_val
+
+                match_res, match_valid = self._decode_match(field.match_clause, temp_context)
+                if isinstance(match_res, dict):
+                    # Merge match results into promoted_fields (don't replace)
+                    promoted_fields.update(match_res)
+                if not match_valid:
+                    is_valid = False
+                    errors.append("Match clause validation failed")
 
         # --- Post-Processing ---
         if field.default_value is not None and not isinstance(field_type, PadType):
@@ -787,15 +879,19 @@ class Decoder:
                 const_val = self.get_constant_value(expected_value)
                 if const_val is not None: expected_value = const_val
 
-            if isinstance(expected_value, int) and isinstance(field_type, IntegerType):
+            if isinstance(expected_value, int) and isinstance(field_type, (IntegerType, BitFieldType)):
                 numeric_val = decoded_value
-                if isinstance(decoded_value, str) and '.' in decoded_value:
+                # Handle decoded enum values for integer types
+                if isinstance(field_type, IntegerType) and isinstance(decoded_value, str) and '.' in decoded_value:
                     enum_def = self.get_enum(field_type.enum_name)
                     if enum_def:
                         m = enum_def.get_member_by_name(decoded_value.split('.')[1])
                         if m: numeric_val = m.value
-                
-                if numeric_val != expected_value:
+                # For bitfield types, decoded_value is already the integer bit value (or dict if has body)
+                if isinstance(decoded_value, dict):
+                    # Bitfield with body - no validation (each member validates separately)
+                    pass
+                elif numeric_val != expected_value:
                     is_valid = False
                     errors.append(f"Value mismatch: expected {expected_value}, got {numeric_val}")
 
@@ -812,7 +908,11 @@ class Decoder:
                 # Add resolved value to promoted fields
                 promoted_fields[f"{field.name}_resolved"] = FieldValue(resolved_hex, resolved_val)
 
-        is_constrained = (field.default_value is not None) or (isinstance(field.type, EnumTypeRef) and self.get_enum(field.type.enum_name))
+        is_constrained = (
+            (field.default_value is not None) or
+            (isinstance(field.type, EnumTypeRef) and self.get_enum(field.type.enum_name)) or
+            self._bitfield_has_constraints(field)
+        )
 
         return DecodeResult(
             name=field.name, hex_value=hex_value, decoded_value=decoded_value,
@@ -830,10 +930,17 @@ class Decoder:
             total += field_size
         return total
 
+    def _bitfield_has_constraints(self, field: Field) -> bool:
+        """Check if a bitfield has any fixed value constraints."""
+        if not field.bitfield_body:
+            return False
+        return any(bf.default_value is not None for bf in field.bitfield_body.fields)
+
     def _message_has_constraints(self, msg: Message) -> bool:
         fields = self.resolve_message(msg)
         for field in fields:
             if field.default_value is not None: return True
+            if self._bitfield_has_constraints(field): return True
             if isinstance(field.type, EnumTypeRef):
                 if self.get_enum(field.type.enum_name): return True
                 embedded_msg = self.coco_file.get_message(field.type.enum_name)
@@ -845,7 +952,13 @@ class Decoder:
         if isinstance(field_type, IntegerType): return field_type.byte_size
         if isinstance(field_type, EnumTypeRef):
             enum_def = self.get_enum(field_type.enum_name)
-            if enum_def: return IntegerType(base=enum_def.base_type).byte_size
+            if enum_def:
+                # Handle bit-aligned enums
+                if enum_def.base_type.startswith("bits["):
+                    bit_count = int(enum_def.base_type[5:-1])
+                    return (bit_count + 7) // 8  # Round up to bytes
+                else:
+                    return IntegerType(base=enum_def.base_type).byte_size
             msg_def = self.coco_file.get_message(field_type.enum_name)
             if msg_def:
                 if field.size is not None:
@@ -917,6 +1030,11 @@ class Decoder:
         if len(field_path) == 1:
             val = context.get(field_path[0])
             if isinstance(val, FieldValue): val = val.val
+            # If not found in context, check if it's a constant
+            if val is None:
+                const_val = self.get_constant_value(field_path[0])
+                if const_val is not None and isinstance(const_val, int):
+                    return const_val
             return val
         current = context
         for part in field_path:
@@ -933,18 +1051,45 @@ class Decoder:
             if isinstance(actual_val, dict): self._flatten_to_context(full_key, actual_val, context)
             elif isinstance(actual_val, (int, float, str)): context[full_key] = actual_val
 
-    def _decode_bitfield(self, int_val: int, field: Field, byte_count: int = 1) -> dict | int:
-        if not field.bitfield_body or not isinstance(field.type, BitFieldType): return int_val
+    def _decode_bitfield(self, int_val: int, field: Field, byte_count: int = 1) -> tuple[dict | int, bool, list[str]]:
+        """Decode a bitfield and validate any fixed value constraints.
+
+        Returns:
+            Tuple of (decoded_value, is_valid, errors)
+        """
+        if not field.bitfield_body or not isinstance(field.type, BitFieldType):
+            return int_val, True, []
         total_bits = field.type.bit_count
         result, current_bit = {}, total_bits
+        is_valid = True
+        errors = []
         for bf in field.bitfield_body.fields:
             current_bit -= bf.bit_count
             mask = (1 << bf.bit_count) - 1
             value = (int_val >> current_bit) & mask
             result[bf.name] = FieldValue(format(value, 'x') if value > 0 else '0', value)
-        return result
+
+            # Validate fixed value constraint
+            if bf.default_value is not None:
+                expected = bf.default_value
+                if isinstance(expected, str):
+                    # Resolve constant reference
+                    const_val = self.get_constant_value(expected)
+                    if const_val is not None:
+                        expected = const_val
+                if isinstance(expected, int) and value != expected:
+                    is_valid = False
+                    errors.append(f"Bitfield {bf.name}: expected {hex(expected)}, got {hex(value)}")
+        return result, is_valid, errors
 
     def _resolve_path(self, path: str, context: dict):
+        # Check if full path exists as a flattened key first (e.g., "length.low")
+        if path in context:
+            value = context[path]
+            if isinstance(value, FieldValue): value = value.val
+            return value
+
+        # Otherwise navigate through nested dicts
         parts = path.split('.')
         value = context
         for part in parts:
@@ -1079,6 +1224,8 @@ class Decoder:
                         result_dict[sub_name] = sub_val
                         actual_val = sub_val.val if isinstance(sub_val, FieldValue) else sub_val
                         context[sub_name] = actual_val
+                        # Also add flattened dotted path for standalone match clauses (e.g., "length.low")
+                        context[f"{field.name}.{sub_name}"] = actual_val
 
             # Update context for the base field
             context[field.name] = decode_result.decoded_value
@@ -1103,18 +1250,40 @@ class Decoder:
         return (result_dict, all_valid) if track_validity else result_dict
 
     def _decode_embedded_message(self, msg_def: Message, context: dict) -> tuple[dict, int]:
-        """Decode a single embedded message."""
+        """Decode a single embedded message with recursion depth limiting."""
         start_bits = self.bit_offset
 
-        with self._layer_anchor(msg_def.name, start_bits):
-            fields = self.resolve_message(msg_def)
-            result_dict, _, _ = self._decode_fields(fields, dict(context))
+        # Check recursion depth limit
+        if len(self.message_recursion_stack) >= self.MAX_MESSAGE_DEPTH:
+            # Hit max depth - stop decoding and return empty result
+            return {}, 0
 
-        return result_dict, self.bit_offset - start_bits
+        # Check for recursion loop (same message at same offset)
+        current_state = (msg_def.name, start_bits)
+        if current_state in self.message_recursion_stack:
+            # Loop detected - stop decoding
+            return {}, 0
 
-    def _decode_message_array(self, msg_def: Message, field: Field, context: dict) -> tuple[list, int]:
+        # Track recursion
+        self.message_recursion_stack.append(current_state)
+        try:
+            with self._layer_anchor(msg_def.name, start_bits):
+                fields = self.resolve_message(msg_def)
+                result_dict, _, _ = self._decode_fields(fields, dict(context))
+            return result_dict, self.bit_offset - start_bits
+        finally:
+            # Always pop from stack when done
+            self.message_recursion_stack.pop()
+
+    def _decode_message_array(self, msg_def: Message, field: Field, context: dict) -> tuple[list, int, list[str]]:
+        """Decode an array of messages.
+
+        Returns:
+            Tuple of (result list, consumed bits, nested protocol chain parts)
+        """
         start_bits = self.bit_offset
         result = []
+        nested_chains = []  # Collect unique nested chain parts
         count = None
         if isinstance(field.size, LiteralSize): count = field.size.value
         elif isinstance(field.size, FieldRefSize): count = self._resolve_field_path(field.size.field_path, context) or 0
@@ -1138,7 +1307,7 @@ class Decoder:
                         consumed = trial_decoder.bit_offset - original_offset
                         if consumed == 0:
                             continue
-                            
+
                         if best_result is None or trial_res.validated_constraints > best_result.validated_constraints:
                             best_result, best_bits = trial_res, consumed
                 except Exception as e:
@@ -1146,10 +1315,15 @@ class Decoder:
             if best_result:
                 element_dict = {f_res.name: FieldValue(f_res.hex_value, f_res.decoded_value) for f_res in best_result.fields}
                 result.append(element_dict)
+                # Collect nested protocol chain parts (skip the message name itself, already added)
+                if best_result.protocol_chain:
+                    for chain_part in best_result.protocol_chain[1:]:  # Skip first element (the message itself)
+                        if chain_part not in nested_chains:
+                            nested_chains.append(chain_part)
                 self.bit_offset = original_offset + best_bits
                 element_idx += 1
             else: break
-        return result, self.bit_offset - start_bits
+        return result, self.bit_offset - start_bits, nested_chains
 
     def validate_message(self, msg: Message, hex_str: str = None, allow_remaining: bool = False, context: dict = None) -> ValidationResult:
         if hex_str is not None:
